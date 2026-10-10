@@ -1,0 +1,28 @@
+# Despliegue del chatbot TALENTUM GROUP en Render (tier gratuito)
+services:
+  - type: web
+    name: talentum-chatbot
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      # Token de verificación del webhook: lo inventas tú.
+      # Debe coincidir EXACTAMENTE con el que registres en el panel de Meta.
+      - key: VERIFY_TOKEN
+        sync: false
+      # Token de acceso permanente de la app de Meta (System User).
+      - key: WHATSAPP_TOKEN
+        sync: false
+      # Clave de la API de Gemini (gratis en https://aistudio.google.com/).
+      # Es el cerebro conversacional del bot.
+      - key: GEMINI_API_KEY
+        sync: false
+      # Modelo de Gemini (opcional, tiene valor por defecto en el código).
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash
+      # "Phone number ID" del número de WhatsApp (panel de Meta → WhatsApp → API Setup).
+      - key: PHONE_NUMBER_ID
+        sync: false
+      # Versión de la Graph API (opcional, tiene valor por defecto en el código).
+      - key: GRAPH_API_VERSION
+        value: v21.0
