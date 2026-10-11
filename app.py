@@ -16,7 +16,12 @@ import os
 import requests
 from fastapi import FastAPI, Request, Response
 
-from engine import process_message, process_document, drain_outbox
+from engine import (
+    process_message,
+    process_document,
+    drain_outbox,
+    send_whatsapp_message,
+)
 
 # --- Configuración desde variables de entorno (sin secretos en el código) ---
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "")
@@ -230,33 +235,3 @@ def extract_documents(payload):
         log.exception("No se pudo parsear documentos del payload")
     return out
 
-
-def send_whatsapp_message(to, text):
-    """Envía un mensaje de texto vía Graph API.
-
-    Maneja errores sin romper el flujo: registra el fallo y devuelve False.
-    WhatsApp limita el texto a ~4096 caracteres; se trunca a 4000 por seguridad.
-    """
-    if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
-        log.error("Faltan WHATSAPP_TOKEN o PHONE_NUMBER_ID en el entorno.")
-        return False
-    url = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "text",
-        "text": {"body": text[:4000]},
-    }
-    try:
-        r = requests.post(url, headers=headers, json=body, timeout=15)
-    except Exception:
-        log.exception("Excepción al enviar mensaje de WhatsApp")
-        return False
-    if r.status_code >= 400:
-        log.error("Error al enviar mensaje (%s): %s", r.status_code, r.text[:500])
-        return False
-    return True

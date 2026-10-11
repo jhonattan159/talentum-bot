@@ -31,6 +31,12 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 import db
+from engine import (
+    send_whatsapp_message,
+    get_conversation,
+    save_conversation,
+    _push_history,
+)
 
 log = logging.getLogger("talentum.admin")
 
@@ -390,6 +396,21 @@ def _render_chat(chat):
         f'Estado: <b>{html.escape(chat["state"])}</b> · '
         f'Actualizado: {html.escape(chat["updated_at"])}</div>'
         + ("".join(msgs) or '<div class="empty">Sin mensajes.</div>')
+        + f'''
+        <form method="post" action="/admin/chat/{html.escape(chat["phone"])}/reply"
+              style="margin-top:20px;display:flex;gap:8px;">
+          <input type="text" name="message" placeholder="Escribe tu respuesta como asesor…"
+                 required maxlength="4000"
+                 style="flex:1;padding:12px;border:1px solid #ccc;border-radius:8px;font-size:15px;" />
+          <button type="submit"
+                  style="padding:12px 20px;background:#0A1F44;color:#fff;border:none;border-radius:8px;font-size:15px;font-weight:700;">
+            Enviar
+          </button>
+        </form>
+        <div style="margin-top:8px;font-size:12px;color:#888;">
+          El mensaje sale del número de TALENTUM. Solo funciona si el cliente
+          te escribió en las últimas 24 horas.
+        </div>'''
     )
     return _page(f'Chat {chat["phone"]}', body)
 
@@ -559,6 +580,31 @@ def admin_home(_: str = Depends(_require_admin)):
 def admin_chat(phone: str, _: str = Depends(_require_admin)):
     """Historial completo de una conversación."""
     return _render_chat(get_chat(phone))
+
+
+@router.post("/chat/{phone}/reply")
+async def admin_reply(phone: str, request: Request, _: str = Depends(_require_admin)):
+    """El dueño responde al cliente desde el panel (sale del número de TALENTUM)."""
+    digits = "".join(c for c in (phone or "") if c.isdigit())
+    try:
+        body = (await request.body()).decode("utf-8", "replace")
+        params = urllib.parse.parse_qs(body)
+        message = (params.get("message", [""])[0] or "").strip()
+    except Exception:
+        message = ""
+    if digits and message:
+        ok = send_whatsapp_message(digits, message)
+        try:
+            conv = get_conversation(digits)
+            data = conv["data"]
+            _push_history(
+                data, "model",
+                "🧑‍💼 Asesor: " + message + ("" if ok else " [no se pudo enviar]"),
+            )
+            save_conversation(digits, conv["state"], data, conv["fails"])
+        except Exception:
+            log.exception("No se pudo registrar la respuesta del panel")
+    return RedirectResponse(url=f"/admin/chat/{phone}", status_code=303)
 
 
 @router.get("/leads", response_class=HTMLResponse)

@@ -27,6 +27,8 @@ import re
 import sqlite3
 import time
 
+import requests
+
 import brain
 
 log = logging.getLogger("talentum.engine")
@@ -46,6 +48,43 @@ CHAT = "chat"
 ASESOR = "asesor"  # derivado a humano: el bot queda en silencio
 
 MAX_HISTORY = 20  # mensajes (10 intercambios) que se envían al LLM
+
+# --- Envío de WhatsApp (Graph API). Vive aquí para que app.py y admin.py
+# lo compartan sin importes circulares. ---
+WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
+PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
+GRAPH_VERSION = os.environ.get("GRAPH_API_VERSION", "v21.0")
+
+
+def send_whatsapp_message(to, text):
+    """Envía un mensaje de texto vía Graph API.
+
+    Maneja errores sin romper el flujo: registra el fallo y devuelve False.
+    WhatsApp limita el texto a ~4096 caracteres; se trunca a 4000 por seguridad.
+    """
+    if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
+        log.error("Faltan WHATSAPP_TOKEN o PHONE_NUMBER_ID en el entorno.")
+        return False
+    url = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": text[:4000]},
+    }
+    try:
+        r = requests.post(url, headers=headers, json=body, timeout=15)
+    except Exception:
+        log.exception("Excepción al enviar mensaje de WhatsApp")
+        return False
+    if r.status_code >= 400:
+        log.error("Error al enviar mensaje (%s): %s", r.status_code, r.text[:500])
+        return False
+    return True
 
 # ---------------------------------------------------------------------------
 # Catálogo de servicios (fuente única del tarifario)
