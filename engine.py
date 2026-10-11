@@ -351,6 +351,20 @@ def _is_owner(phone):
     return bool(p and o) and p == o
 
 
+# Buzón de salida: mensajes del dueño hacia clientes.
+# engine no importa app (sería circular); app.py lo vacía con drain_outbox()
+# después de procesar cada mensaje y los envía con send_whatsapp_message.
+_OUTBOX = []
+
+
+def drain_outbox():
+    """Devuelve y vacía [(teléfono destino, texto)] encolados por el dueño."""
+    global _OUTBOX
+    out = _OUTBOX
+    _OUTBOX = []
+    return out
+
+
 def _rel_time(ts):
     """Tiempo relativo en español: 'hace 5 min', 'ayer', etc."""
     try:
@@ -466,8 +480,33 @@ def _owner_help():
         "*Comandos del dueño:*\n"
         "• chats — últimas 10 conversaciones\n"
         "• chat <número> — últimos 10 mensajes de ese chat\n"
+        "• responder <número> <mensaje> — escribirle a un cliente desde el número de TALENTUM\n"
         "• ayuda — esta lista"
     )
+
+
+def _owner_responder(raw_phone, message):
+    """Encola un mensaje del dueño para un cliente.
+
+    El mensaje sale del número de TALENTUM (no del personal del dueño) y
+    queda registrado en el historial del chat como mensaje del asesor.
+    """
+    digits = re.sub(r"\D", "", raw_phone or "")
+    message = (message or "").strip()
+    if not digits or not message:
+        return (
+            "Uso: responder <número> <mensaje>\n"
+            "Ej: responder 593991234567 Hola, soy Jhonattan de TALENTUM."
+        )
+    _OUTBOX.append((digits, message))
+    try:
+        conv = get_conversation(digits)
+        data = conv["data"]
+        _push_history(data, "model", "🧑‍💼 Asesor: " + message)
+        save_conversation(digits, conv["state"], data, conv["fails"])
+    except Exception:
+        log.exception("No se pudo registrar el mensaje del asesor en el historial")
+    return f"✓ Mensaje para +{digits} encolado. Saldrá del número de TALENTUM."
 
 
 def _owner_command(text):
@@ -476,7 +515,8 @@ def _owner_command(text):
     Devuelve la respuesta (str) si `text` es un comando, o None si no lo es
     (el flujo normal del bot continúa).
     """
-    low = (text or "").strip().lower()
+    raw = (text or "").strip()
+    low = raw.lower()
     if low == "chats":
         return _owner_chats()
     if low == "ayuda":
@@ -484,6 +524,9 @@ def _owner_command(text):
     m = re.match(r"^chat\s+(\+?[\d][\d\s]*)$", low)
     if m:
         return _owner_chat_cmd(m.group(1))
+    m = re.match(r"^responder\s+(\+?[\d][\d\s]*)\s+(.+)$", raw, re.DOTALL)
+    if m:
+        return _owner_responder(m.group(1), m.group(2))
     return None
 
 

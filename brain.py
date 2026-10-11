@@ -50,11 +50,11 @@ GEMINI_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 )
 DEFAULT_MODEL = "gemini-3.6-flash"
-TIMEOUT_SECS = 20
+TIMEOUT_SECS = 60
 
 # Pausas del pool de rotación (segundos)
 COOLDOWN_QUOTA = 60      # 429 / 5xx / error de red: cupo agotado o fallo temporal
-COOLDOWN_INVALID = 3600  # 400 / 401 / 403: clave inválida o sin permiso
+COOLDOWN_INVALID = 3600  # 401 / 403: clave inválida o sin permiso
 
 # ---------------------------------------------------------------------------
 # Prompt del sistema (identidad, tono, tarifario, objetivos)
@@ -173,7 +173,7 @@ class _KeyPool:
                 self._cooldown_until.pop(idx, None)
                 return
             now = time.time()
-            if status in (400, 401, 403):
+            if status in (401, 403):
                 self._cooldown_until[idx] = now + COOLDOWN_INVALID
                 log.warning(
                     "Gemini key #%d rechazada (HTTP %s); en pausa 1h.", idx, status
@@ -209,6 +209,10 @@ def _to_gemini_contents(history, user_message):
     text = (user_message or "").strip()
     if text:
         contents.append({"role": "user", "parts": [{"text": text}]})
+    # La API rechaza requests que terminan con turno del modelo (HTTP 400):
+    # se recortan los turnos finales del modelo para no envenenar las keys.
+    while contents and contents[-1]["role"] == "model":
+        contents.pop()
     return contents
 
 
@@ -341,6 +345,14 @@ def _call_gemini(contents, system_prompt, temperature=0.7, max_tokens=300,
                 usage["model"] = model
             _record_usage(operation, idx, model, usage)
             return text, usage
+        if r.status_code == 400:
+            # Request malformado (error nuestro, no de la key): reintentar con
+            # otras keys es inútil y castigarlas 1h envenena el pool.
+            log.error(
+                "Gemini HTTP 400 (request inválido, no se reintenta): %s",
+                r.text[:300],
+            )
+            return None, None
         # Fallo: se registra, la key entra en pausa y se prueba la siguiente
         log.error("Gemini HTTP %s: %s", r.status_code, r.text[:300])
         _POOL.report(idx, False, status=r.status_code)
@@ -356,7 +368,7 @@ def generate_reply(history, user_message):
     if not contents:
         return None
     text, _usage = _call_gemini(
-        contents, SYSTEM_PROMPT, temperature=0.7, max_tokens=300,
+        contents, SYSTEM_PROMPT, temperature=0.7, max_tokens=1000,
         operation="chat",
     )
     return text

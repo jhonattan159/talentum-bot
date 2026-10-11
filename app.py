@@ -16,7 +16,7 @@ import os
 import requests
 from fastapi import FastAPI, Request, Response
 
-from engine import process_message, process_document
+from engine import process_message, process_document, drain_outbox
 
 # --- Configuración desde variables de entorno (sin secretos en el código) ---
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "")
@@ -87,6 +87,18 @@ async def receive_webhook(request: Request):
             ]
         for reply in replies:
             send_whatsapp_message(phone, reply)
+        # Mensajes del dueño hacia clientes (comando "responder"): salen del
+        # número de TALENTUM. Si falla el envío se le avisa al dueño.
+        for to_phone, out_text in drain_outbox():
+            if send_whatsapp_message(to_phone, out_text):
+                log.info("Mensaje del dueño enviado a +%s", to_phone)
+            else:
+                log.error("No se pudo enviar el mensaje del dueño a +%s", to_phone)
+                send_whatsapp_message(
+                    phone,
+                    f"⚠ No se pudo enviar el mensaje a +{to_phone} "
+                    "(quizá pasaron más de 24h sin que te escriba).",
+                )
 
     for doc in extract_documents(payload):
         try:
