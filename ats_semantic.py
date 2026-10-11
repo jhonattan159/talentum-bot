@@ -36,16 +36,41 @@ POSTING_MAX_CHARS = 2000
 MAX_HALLAZGOS = 6
 MAX_FORTALEZAS = 5
 MAX_ACCIONES = 5
+MAX_SECCIONES = 5
+MAX_POR_SECCION = 2
+
+# Secciones obligatorias de la revisión, en orden
+SECCIONES_REVISION = (
+    "Contacto",
+    "Experiencia",
+    "Educación",
+    "Habilidades",
+    "Formato/ATS",
+)
+
+VEREDICTOS = ("solido", "mejorar", "critico")
+VEREDICTO_LABEL = {"solido": "Sólido", "mejorar": "A mejorar", "critico": "Crítico"}
+VEREDICTO_ICON = {"solido": "✓", "mejorar": "⚠", "critico": "✗"}
 
 # ---------------------------------------------------------------------------
 # Prompt del revisor semántico
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT_SEMANTIC = """Actúas como un reclutador técnico senior con más de 20 años en
-selección multinacional. Analizas un CV frente a un aviso laboral (si se
-incluye uno) para una auditoría de legibilidad ATS y calidad de contenido.
+selección multinacional. Haces una auditoría ejecutiva de un CV, sección por
+sección, frente a un aviso laboral (si se incluye uno).
 
-Dimensiones a analizar:
+Para CADA UNA de estas 5 secciones — Contacto, Experiencia, Educación,
+Habilidades, Formato/ATS — entrega:
+- veredicto: "solido" (está bien, nada urgente), "mejorar" (funciona pero
+  tiene brechas concretas) o "critico" (falla grave que bloquea filtros ATS
+  o la lectura del reclutador).
+- fortalezas: 1 a 2 puntos fuertes CONCRETOS de esa sección, cada uno con
+  evidencia textual del CV (cita breve o dato verificable).
+- mejoras: 1 a 2 mejoras CONCRETAS de esa sección, cada una con evidencia
+  del problema y un "como" accionable (qué cambiar exactamente).
+
+Además evalúa estas dimensiones globales:
 1. Encaje de seniority: ¿el perfil se lee junior / mid / senior frente al
    aviso (si se da)? No inventes años de experiencia que no estén escritos.
 2. Calidad de los logros: ¿los bullets orientan a resultados medibles o son
@@ -54,16 +79,35 @@ Dimensiones a analizar:
    están ausentes frente al aviso, o están forzados/keyword stuffing?
 4. Claridad y estructura: ¿orden lógico, fechas consistentes, legibilidad?
 
+Cierra con:
+- fortalezas: las 3 más importantes de todo el CV, verificables.
+- acciones: las 3 a 5 acciones de mayor impacto, ordenadas. Cada una con
+  "accion" (qué hacer, concreto) y "porque" (por qué importa: qué gana el
+  candidato o qué pierde si no lo hace, en una línea).
+
 Reglas de honestidad, obligatorias y no negociables:
 - NUNCA inventes datos del CV: si un dato no está escrito, no lo afirmes.
-- Marca explícitamente lo que "no se pudo determinar".
+- Si una sección no trae información suficiente, su veredicto es "mejorar"
+  o "critico" según el caso y escribe "no se pudo determinar" donde aplique.
 - NUNCA emitas un puntaje ATS universal ni afirmes predecir el puntaje de
   un ATS específico (Workday, Taleo, Greenhouse, iCIMS, etc.).
-- No des consejos genéricos: cada acción debe atacar un hallazgo concreto.
+- No des consejos genéricos: cada mejora y cada acción debe atacar un
+  hallazgo concreto con evidencia del CV.
 
 Responde ÚNICAMENTE con un objeto JSON válido, sin texto adicional y sin
 bloques de código, con EXACTAMENTE estas claves:
 {
+  "secciones": [
+    {
+      "seccion": "Contacto",
+      "veredicto": "solido|mejorar|critico",
+      "fortalezas": ["fortaleza con evidencia concreta", "..."],
+      "mejoras": [
+        {"texto": "qué mejorar, con evidencia del problema",
+         "como": "cómo corregirlo, concreto y accionable"}
+      ]
+    }
+  ],
   "encaje_seniority": "texto breve",
   "calidad_logros": "texto breve",
   "keywords_contexto": {
@@ -80,8 +124,11 @@ bloques de código, con EXACTAMENTE estas claves:
       "como_arreglarlo": "corrección concreta y accionable"
     }
   ],
-  "fortalezas": ["fortaleza concreta y verificable", "..."],
-  "acciones": ["acción concreta, ordenada por impacto", "..."]
+  "fortalezas": ["las 3 fortalezas principales, verificables"],
+  "acciones": [
+    {"accion": "qué hacer, concreto y ordenado por impacto",
+     "porque": "por qué importa, en una línea"}
+  ]
 }"""
 
 
@@ -119,6 +166,72 @@ def _parse_json_object(text):
         except (ValueError, TypeError):
             return {}
     return obj if isinstance(obj, dict) else {}
+
+
+def _norm_veredicto(v):
+    """Normaliza el veredicto a solido|mejorar|critico (tolera acentos)."""
+    s = (v or "").strip().lower().replace("ó", "o").replace("í", "i")
+    return s if s in VEREDICTOS else None
+
+
+def _sanitize_seccion(item):
+    """Valida una sección de la revisión. Dict o None."""
+    if not isinstance(item, dict):
+        return None
+    nombre = item.get("seccion")
+    nombre = nombre.strip() if isinstance(nombre, str) and nombre.strip() else None
+    veredicto = _norm_veredicto(item.get("veredicto"))
+    if not (nombre and veredicto):
+        return None
+
+    def _str_list(v, cap):
+        if not isinstance(v, list):
+            return []
+        out = []
+        for x in v:
+            s = x.strip() if isinstance(x, str) and x.strip() else None
+            if s:
+                out.append(s)
+            if len(out) >= cap:
+                break
+        return out
+
+    mejoras = []
+    raw_m = item.get("mejoras")
+    if isinstance(raw_m, list):
+        for m in raw_m:
+            if isinstance(m, dict):
+                texto = m.get("texto")
+                como = m.get("como")
+            else:
+                texto, como = m, ""
+            texto = texto.strip() if isinstance(texto, str) and texto.strip() else None
+            como = como.strip() if isinstance(como, str) and como.strip() else ""
+            if texto:
+                mejoras.append({"texto": texto, "como": como})
+            if len(mejoras) >= MAX_POR_SECCION:
+                break
+
+    return {
+        "seccion": nombre,
+        "veredicto": veredicto,
+        "fortalezas": _str_list(item.get("fortalezas"), MAX_POR_SECCION),
+        "mejoras": mejoras,
+    }
+
+
+def _sanitize_accion(item):
+    """Normaliza una acción a {"accion","porque"}. Acepta dict o str."""
+    if isinstance(item, dict):
+        accion = item.get("accion")
+        porque = item.get("porque")
+    else:
+        accion, porque = item, ""
+    accion = accion.strip() if isinstance(accion, str) and accion.strip() else None
+    porque = porque.strip() if isinstance(porque, str) and porque.strip() else ""
+    if not accion:
+        return None
+    return {"accion": accion, "porque": porque}
 
 
 def _sanitize_semantic(data):
@@ -183,14 +296,35 @@ def _sanitize_semantic(data):
             if len(hallazgos) >= MAX_HALLAZGOS:
                 break
 
+    secciones = []
+    raw_s = data.get("secciones")
+    if isinstance(raw_s, list):
+        for item in raw_s:
+            s = _sanitize_seccion(item)
+            if s:
+                secciones.append(s)
+            if len(secciones) >= MAX_SECCIONES:
+                break
+
+    acciones = []
+    raw_a = data.get("acciones")
+    if isinstance(raw_a, list):
+        for item in raw_a:
+            a = _sanitize_accion(item)
+            if a and a["accion"].lower() not in {x["accion"].lower() for x in acciones}:
+                acciones.append(a)
+            if len(acciones) >= MAX_ACCIONES:
+                break
+
     out = {
+        "secciones": secciones,
         "encaje_seniority": encaje,
         "calidad_logros": calidad,
         "keywords_contexto": kw_out,
         "claridad": claridad,
         "hallazgos": hallazgos,
         "fortalezas": _str_list(data.get("fortalezas"), MAX_FORTALEZAS),
-        "acciones": _str_list(data.get("acciones"), MAX_ACCIONES),
+        "acciones": acciones,
     }
     return out
 
@@ -206,8 +340,9 @@ def semantic_review(cv_text, job_posting_text=None):
         if not cv_text or not cv_text.strip():
             return None
         contents = _build_user_contents(cv_text, job_posting_text)
-        text = _call_gemini(
-            contents, SYSTEM_PROMPT_SEMANTIC, temperature=0.3, max_tokens=1200
+        text, _usage = _call_gemini(
+            contents, SYSTEM_PROMPT_SEMANTIC, temperature=0.3, max_tokens=2000,
+            operation="semantic_review",
         )
         if not text:
             return None
@@ -249,8 +384,41 @@ def _verdict(indice):
     return "Tu CV necesita una reestructuración a fondo para pasar filtros ATS."
 
 
+def _short(text, max_words=10):
+    """Recorta a N palabras para las líneas compactas."""
+    words = (text or "").split()
+    if len(words) <= max_words:
+        return " ".join(words)
+    return " ".join(words[:max_words]) + "…"
+
+
+def _section_line(sec):
+    """Línea compacta: icono + sección + motivo (6-10 palabras)."""
+    icon = VEREDICTO_ICON.get(sec.get("veredicto"), "•")
+    nombre = sec.get("seccion", "—")
+    if sec.get("veredicto") != "solido" and sec.get("mejoras"):
+        motivo = _short(sec["mejoras"][0].get("texto", ""), 10)
+    elif sec.get("fortalezas"):
+        motivo = _short(sec["fortalezas"][0], 10)
+    else:
+        motivo = VEREDICTO_LABEL.get(sec.get("veredicto"), "")
+    return "{} *{}:* {}".format(icon, nombre, motivo)
+
+
+def _accion_item(a):
+    """Normaliza una acción del reporte a (accion, porque)."""
+    if isinstance(a, dict):
+        return (str(a.get("accion") or "").strip(),
+                str(a.get("porque") or "").strip())
+    return (str(a or "").strip(), "")
+
+
 def format_whatsapp(report):
-    """Formatea el reporte final como mensaje de WhatsApp (~1300 chars máx)."""
+    """Formatea el reporte final como mensaje de WhatsApp (1200-2000 chars).
+
+    Incluye bloque por sección, top 3 fortalezas y acciones priorizadas
+    con su porqué. Tono ejecutivo, sin clichés.
+    """
     try:
         if not isinstance(report, dict):
             return ""
@@ -261,12 +429,11 @@ def format_whatsapp(report):
         except (TypeError, ValueError):
             indice = None
 
-        acciones = report.get("acciones") or []
-        acciones = [a for a in acciones if isinstance(a, str) and a.strip()][:3]
-        fortalezas = report.get("fortalezas") or []
-        fortaleza = next(
-            (f for f in fortalezas if isinstance(f, str) and f.strip()), None
-        )
+        secciones = [s for s in (report.get("secciones") or [])
+                     if isinstance(s, dict)][:MAX_SECCIONES]
+        fortalezas = [f for f in (report.get("fortalezas") or [])
+                      if isinstance(f, str) and f.strip()][:3]
+        acciones = [a for a in (report.get("acciones") or [])][:5]
 
         lines = []
         lines.append("📋 *Diagnóstico ATS — TALENTUM GROUP*")
@@ -278,33 +445,45 @@ def format_whatsapp(report):
         else:
             lines.append("Índice no disponible en esta revisión.")
 
+        if secciones:
+            lines.append("")
+            lines.append("*Por sección:*")
+            for sec in secciones:
+                lines.append(_section_line(sec))
+
+        if fortalezas:
+            lines.append("")
+            lines.append("*Fortalezas:*")
+            for f in fortalezas:
+                f = f.strip()
+                if len(f) > 160:
+                    f = f[:157].rstrip() + "…"
+                lines.append("✓ " + f)
+
         if acciones:
             lines.append("")
-            lines.append("*Top 3 acciones:*")
-            for i, acc in enumerate(acciones, 1):
-                acc = acc.strip()
-                if len(acc) > 280:
-                    acc = acc[:277].rstrip() + "…"
-                lines.append("{}. {}".format(i, acc))
-
-        if fortaleza:
-            f = fortaleza.strip()
-            if len(f) > 220:
-                f = f[:217].rstrip() + "…"
-            lines.append("")
-            lines.append("✓ *Fortaleza:* " + f)
+            lines.append("*Acciones priorizadas:*")
+            for i, a in enumerate(acciones, 1):
+                accion, porque = _accion_item(a)
+                if not accion:
+                    continue
+                if len(accion) > 220:
+                    accion = accion[:217].rstrip() + "…"
+                lines.append("{}. {}".format(i, accion))
+                if porque:
+                    if len(porque) > 140:
+                        porque = porque[:137].rstrip() + "…"
+                    lines.append("   ↳ *Por qué:* " + porque)
 
         lines.append("")
-        lines.append(
-            "Un asesor puede aplicar esto por ti: responde *ASESOR*."
-        )
+        lines.append("Un asesor puede aplicar esto por ti: responde *ASESOR*.")
 
         msg = "\n".join(lines)
         for cliche in BANNED_CLICHES:
             if cliche.lower() in msg.lower():
                 log.warning("Cliché prohibido detectado en mensaje WhatsApp: %r", cliche)
-        if len(msg) > 1300:
-            msg = msg[:1297].rstrip() + "…"
+        if len(msg) > 2000:
+            msg = msg[:1997].rstrip() + "…"
         return msg
     except Exception:
         log.exception("Fallo inesperado en format_whatsapp")
@@ -326,6 +505,11 @@ SEVERITY_LABELS = {
     "critico": "Crítico",
     "medio": "Medio",
     "leve": "Leve",
+}
+VEREDICTO_COLORS = {
+    "solido": "#067647",   # verde oscuro
+    "mejorar": "#B54708",  # ámbar oscuro
+    "critico": "#B42318",  # rojo oscuro
 }
 
 METHODOLOGY_NOTE = (
@@ -356,7 +540,8 @@ def render_html(report):
         ]
         acciones = [
             a for a in (report.get("acciones") or [])
-            if isinstance(a, str) and a.strip()
+            if (isinstance(a, dict) and str(a.get("accion") or "").strip())
+            or (isinstance(a, str) and a.strip())
         ]
         sem_disp = report.get("revision_semantica_disponible", False)
         nota = report.get("nota_metodologia") or METHODOLOGY_NOTE
@@ -395,9 +580,22 @@ def render_html(report):
         fortalezas_html = "".join(
             "<li>{}</li>".format(_esc(f)) for f in fortalezas
         ) or '<li style="color:#666;">Sin fortalezas registradas.</li>'
-        acciones_html = "".join(
-            "<li>{}</li>".format(_esc(a)) for a in acciones
-        ) or '<li style="color:#666;">Sin acciones registradas.</li>'
+
+        def _accion_li(a):
+            if isinstance(a, dict):
+                t, pq = a.get("accion"), a.get("porque")
+            else:
+                t, pq = a, ""
+            t = str(t or "").strip()
+            pq = str(pq or "").strip()
+            if not t:
+                return ""
+            extra = " <i>({})</i>".format(_esc(pq)) if pq else ""
+            return "<li><b>{}</b>{}</li>".format(_esc(t), extra)
+
+        acciones_html = "".join(_accion_li(a) for a in acciones)
+        if not acciones_html:
+            acciones_html = '<li style="color:#666;">Sin acciones registradas.</li>'
 
         sem_note = (
             "Revisión semántica por experto: incluida."
@@ -405,6 +603,69 @@ def render_html(report):
             else "Revisión semántica por experto: no disponible en esta revisión "
             "(se aplicó solo el análisis automático)."
         )
+
+        # Bloque de revisión por sección (capa semántica)
+        secciones = [
+            s for s in (report.get("secciones") or []) if isinstance(s, dict)
+        ]
+        sec_blocks = []
+        for sec in secciones:
+            v = sec.get("veredicto")
+            color = VEREDICTO_COLORS.get(v, "#555555")
+            vlabel = {"solido": "Sólido", "mejorar": "A mejorar",
+                      "critico": "Crítico"}.get(v, _esc(v or "—"))
+            forts = "".join(
+                "<li>{}</li>".format(_esc(f))
+                for f in (sec.get("fortalezas") or []) if str(f).strip()
+            ) or '<li style="color:#666;">Sin fortalezas registradas.</li>'
+            mejs = []
+            for m in (sec.get("mejoras") or []):
+                if isinstance(m, dict):
+                    t, c = m.get("texto"), m.get("como")
+                else:
+                    t, c = m, ""
+                t = str(t or "").strip()
+                if not t:
+                    continue
+                c = str(c or "").strip()
+                mejs.append(
+                    "<li><b>{}</b>{}</li>".format(
+                        _esc(t),
+                        " — <i>{}</i>".format(_esc(c)) if c else "",
+                    )
+                )
+            mejs_html = "".join(mejs) or \
+                '<li style="color:#666;">Sin mejoras registradas.</li>'
+            sec_blocks.append(
+                '<div style="border:1px solid #E2E4EA;border-radius:8px;'
+                'padding:16px 18px;margin-bottom:14px;">'
+                '<div style="display:flex;align-items:center;gap:10px;'
+                'margin-bottom:10px;">'
+                '<span style="font-size:15px;font-weight:700;color:{navy};">'
+                "{nombre}</span>"
+                '<span style="display:inline-block;padding:2px 10px;'
+                'border-radius:999px;color:#ffffff;background-color:{color};'
+                'font-size:12px;font-weight:600;">{vlabel}</span>'
+                "</div>"
+                '<div style="font-size:12px;font-weight:700;color:{navy};'
+                'margin-bottom:4px;">LO QUE ESTÁ BIEN</div>'
+                '<ul style="font-size:13px;line-height:1.6;margin:0 0 10px;'
+                'padding-left:20px;">{forts}</ul>'
+                '<div style="font-size:12px;font-weight:700;color:{navy};'
+                'margin-bottom:4px;">LO QUE PUEDE MEJORAR</div>'
+                '<ul style="font-size:13px;line-height:1.6;margin:0;'
+                'padding-left:20px;">{mejs}</ul>'
+                "</div>".format(
+                    navy=NAVY, color=color, nombre=_esc(sec.get("seccion", "—")),
+                    vlabel=vlabel, forts=forts, mejs=mejs_html,
+                )
+            )
+        secciones_html = "".join(sec_blocks)
+        if not secciones_html:
+            secciones_html = (
+                '<p style="font-size:13px;color:#666;">Revisión por sección no '
+                "disponible en esta revisión.</p>"
+            )
 
         today = date.today().strftime("%d/%m/%Y")
 
@@ -459,6 +720,10 @@ border-top:6px solid {navy};">
     </table>
 
     <h2 style="font-size:16px;color:{navy};margin:28px 0 12px;
+    text-transform:uppercase;letter-spacing:1px;">Revisión por sección</h2>
+    {secciones}
+
+    <h2 style="font-size:16px;color:{navy};margin:28px 0 12px;
     text-transform:uppercase;letter-spacing:1px;">Fortalezas</h2>
     <ul style="font-size:13px;line-height:1.6;margin:0;padding-left:20px;">
       {fortalezas}
@@ -487,6 +752,7 @@ border-top:6px solid {navy};">
             nota=_esc(nota),
             sem_note=_esc(sem_note),
             criterios=criterios_html,
+            secciones=secciones_html,
             fortalezas=fortalezas_html,
             acciones=acciones_html,
             today=today,

@@ -149,6 +149,16 @@ def _init_db():
             note TEXT,
             created_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS gemini_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            key_index INTEGER NOT NULL,
+            model TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            candidates_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0
+        );
         """
     )
     conn.commit()
@@ -319,6 +329,165 @@ def _maybe_register_diagnostico(phone, data, extracted):
 
 
 # ---------------------------------------------------------------------------
+# Comandos del dueño vía WhatsApp (supervisión sin navegador)
+# ---------------------------------------------------------------------------
+# Solo responden al número del dueño (OWNER_PHONE). Cualquier otro número
+# que escriba estas palabras recibe el flujo NORMAL del bot: los comandos
+# se ignoran en silencio y nunca se revela que existen.
+
+OWNER_PHONE_DEFAULT = "593984705397"
+
+
+def _owner_phone():
+    """Número del dueño normalizado (solo dígitos)."""
+    raw = os.environ.get("OWNER_PHONE", OWNER_PHONE_DEFAULT)
+    return re.sub(r"\D", "", str(raw))
+
+
+def _is_owner(phone):
+    """True solo si el remitente es el número del dueño."""
+    p = re.sub(r"\D", "", str(phone or ""))
+    o = _owner_phone()
+    return bool(p and o) and p == o
+
+
+def _rel_time(ts):
+    """Tiempo relativo en español: 'hace 5 min', 'ayer', etc."""
+    try:
+        delta = time.time() - float(ts)
+    except (TypeError, ValueError):
+        return "—"
+    if delta < 0:
+        return "ahora mismo"
+    if delta < 60:
+        return "ahora mismo"
+    if delta < 3600:
+        m = int(delta // 60)
+        return "hace 1 min" if m == 1 else "hace {} min".format(m)
+    if delta < 86400:
+        h = int(delta // 3600)
+        return "hace 1 h" if h == 1 else "hace {} h".format(h)
+    d = int(delta // 86400)
+    if d == 1:
+        return "ayer"
+    return "hace {} días".format(d)
+
+
+def _last_snippet(data, max_chars=50):
+    """Último mensaje con texto del historial, recortado."""
+    try:
+        hist = (data or {}).get("history") or []
+    except (AttributeError, TypeError):
+        return ""
+    for m in reversed(hist):
+        t = str((m or {}).get("text") or "").strip().replace("\n", " ")
+        if t:
+            return t[:max_chars] + ("…" if len(t) > max_chars else "")
+    return ""
+
+
+def _owner_chats():
+    """Lista las últimas 10 conversaciones."""
+    try:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT phone, data, updated_at FROM conversations "
+                "ORDER BY updated_at DESC LIMIT 10"
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        log.exception("Fallo listando conversaciones para el dueño")
+        return "No pude leer las conversaciones en este momento."
+    if not rows:
+        return "Sin conversaciones registradas."
+    lines = ["*Últimas conversaciones:*"]
+    for i, r in enumerate(rows, 1):
+        try:
+            data = json.loads(r["data"] or "{}")
+        except (ValueError, TypeError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        snippet = _last_snippet(data)
+        lines.append(
+            "{}. {} — {} ({})".format(
+                i, r["phone"], snippet or "sin mensajes", _rel_time(r["updated_at"])
+            )
+        )
+    return "\n".join(lines)
+
+
+def _owner_chat_cmd(arg):
+    """Últimos 10 mensajes de una conversación."""
+    digits = re.sub(r"\D", "", str(arg or ""))
+    if not digits:
+        return "Uso: chat <número>. Ejemplo: chat 593991234567"
+    try:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT phone, data FROM conversations WHERE phone = ?",
+                (digits,),
+            ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT phone, data FROM conversations WHERE phone LIKE ?",
+                    ("%{}%".format(digits),),
+                ).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        log.exception("Fallo leyendo chat para el dueño")
+        return "No pude leer esa conversación en este momento."
+    if row is None:
+        return "No encontré conversación con ese número."
+    try:
+        data = json.loads(row["data"] or "{}")
+    except (ValueError, TypeError):
+        data = {}
+    hist = (data or {}).get("history") or []
+    hist = [m for m in hist if isinstance(m, dict) and str(m.get("text") or "").strip()]
+    if not hist:
+        return "Esa conversación no tiene mensajes."
+    lines = ["*Chat {}:*".format(row["phone"])]
+    for m in hist[-10:]:
+        quien = "Cliente" if m.get("role") == "user" else "Bot"
+        t = str(m.get("text") or "").strip().replace("\n", " ")
+        if len(t) > 160:
+            t = t[:157].rstrip() + "…"
+        lines.append("{}: {}".format(quien, t))
+    return "\n".join(lines)
+
+
+def _owner_help():
+    return (
+        "*Comandos del dueño:*\n"
+        "• chats — últimas 10 conversaciones\n"
+        "• chat <número> — últimos 10 mensajes de ese chat\n"
+        "• ayuda — esta lista"
+    )
+
+
+def _owner_command(text):
+    """Interpreta un posible comando del dueño.
+
+    Devuelve la respuesta (str) si `text` es un comando, o None si no lo es
+    (el flujo normal del bot continúa).
+    """
+    low = (text or "").strip().lower()
+    if low == "chats":
+        return _owner_chats()
+    if low == "ayuda":
+        return _owner_help()
+    m = re.match(r"^chat\s+(\+?[\d][\d\s]*)$", low)
+    if m:
+        return _owner_chat_cmd(m.group(1))
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Punto de entrada principal
 # ---------------------------------------------------------------------------
 
@@ -327,6 +496,13 @@ def process_message(phone, text):
     text = (text or "").strip()
     if not text or not phone:
         return []
+    # Comandos del dueño: solo desde su número, antes del flujo normal.
+    # Otros números que escriban estas palabras reciben el flujo normal
+    # (los comandos se ignoran en silencio).
+    if _is_owner(phone):
+        owner_reply = _owner_command(text)
+        if owner_reply is not None:
+            return [owner_reply]
     conv = get_conversation(phone)
     state, data = conv["state"], conv["data"]
     low = text.lower()
@@ -405,6 +581,13 @@ def process_message(phone, text):
 MAX_PDF_BYTES = 5 * 1024 * 1024
 
 
+def _accion_text(a):
+    """Normaliza una acción (dict {"accion","porque"} o str) a texto."""
+    if isinstance(a, dict):
+        return str(a.get("accion") or "").strip()
+    return str(a or "").strip()
+
+
 def _diagnostic_fallback_text(report):
     """Texto plano del diagnóstico si el formateador semántico no existe."""
     try:
@@ -416,7 +599,9 @@ def _diagnostic_fallback_text(report):
             "(rúbrica interna, no es puntaje de ningún ATS).",
         ]
         for i, a in enumerate(acciones, 1):
-            lineas.append(f"{i}. {a}")
+            t = _accion_text(a)
+            if t:
+                lineas.append(f"{i}. {t}")
         lineas.append("Un asesor puede aplicar esto por ti: responde ASESOR.")
         return "\n".join(lineas)
     except Exception:

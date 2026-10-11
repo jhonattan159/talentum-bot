@@ -707,6 +707,35 @@ def _dedupe(seq):
     return out
 
 
+def _norm_accion(a):
+    """Normaliza una acción a {"accion": str, "porque": str}.
+
+    Acepta dict (nuevo formato semántico) o str (determinístico / legado).
+    """
+    if isinstance(a, dict):
+        accion = str(a.get("accion") or "").strip()
+        porque = str(a.get("porque") or "").strip()
+    else:
+        accion, porque = str(a or "").strip(), ""
+    if not accion:
+        return None
+    return {"accion": accion, "porque": porque}
+
+
+def _dedupe_acciones(seq):
+    """Dedup de acciones normalizadas por texto de la acción."""
+    vistos, out = set(), []
+    for a in seq:
+        n = _norm_accion(a)
+        if n is None:
+            continue
+        key = n["accion"].lower()
+        if key not in vistos:
+            vistos.add(key)
+            out.append(n)
+    return out
+
+
 def diagnose(pdf_bytes, job_posting_text=None, semantic_fn=None):
     """Diagnóstico ATS determinístico (+ semántico si se provee semantic_fn).
 
@@ -722,6 +751,7 @@ def diagnose(pdf_bytes, job_posting_text=None, semantic_fn=None):
         acciones = _derive_actions(findings)
 
         revision_semantica = False
+        secciones = []
         if semantic_fn is not None:
             try:
                 sem = semantic_fn(parsed.get("text") or "", job_posting_text)
@@ -734,11 +764,14 @@ def diagnose(pdf_bytes, job_posting_text=None, semantic_fn=None):
                 fortalezas = _dedupe(fortalezas + [str(x) for x in
                                                    (sem.get("fortalezas") or [])
                                                    if str(x).strip()])
-                acciones = _dedupe(acciones + [str(x) for x in
-                                               (sem.get("acciones") or [])
-                                               if str(x).strip()])
+                acciones = _dedupe_acciones(
+                    acciones + list(sem.get("acciones") or [])
+                )
                 det_index = round(0.6 * det_index + 0.4 * sem_index)
                 revision_semantica = True
+                raw_sec = sem.get("secciones")
+                if isinstance(raw_sec, list):
+                    secciones = [s for s in raw_sec if isinstance(s, dict)]
 
         return {
             "resumen": _build_resumen(det_index, findings, revision_semantica),
@@ -746,6 +779,7 @@ def diagnose(pdf_bytes, job_posting_text=None, semantic_fn=None):
             "indice_diagnostico": int(det_index),
             "fortalezas": fortalezas,
             "acciones": acciones,
+            "secciones": secciones,
             "revision_semantica_disponible": revision_semantica,
             "nota_metodologia": NOTA_METODOLOGIA,
         }
@@ -766,7 +800,8 @@ def diagnose(pdf_bytes, job_posting_text=None, semantic_fn=None):
             "criterios": [fallo],
             "indice_diagnostico": 0,
             "fortalezas": [],
-            "acciones": [fallo["como_arreglarlo"]],
+            "acciones": _dedupe_acciones([fallo["como_arreglarlo"]]),
+            "secciones": [],
             "revision_semantica_disponible": False,
             "nota_metodologia": NOTA_METODOLOGIA,
         }

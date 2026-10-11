@@ -74,8 +74,18 @@ def _ddl():
             note TEXT,
             created_at %s NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS gemini_usage (
+            id %s,
+            ts %s NOT NULL,
+            key_index INTEGER NOT NULL,
+            model TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            candidates_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0
+        );
         """
-        % (ts_col, id_col, ts_col)
+        % (ts_col, id_col, ts_col, id_col, ts_col)
     )
 
 

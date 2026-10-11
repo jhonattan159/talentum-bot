@@ -22,6 +22,14 @@ Contrato:
         Extrae datos estructurados del lead desde el historial.
         Devuelve dict (posiblemente vacío); nunca lanza excepciones.
 
+    _call_gemini(contents, system_prompt, temperature, max_tokens,
+                 operation="chat") -> (str|None, dict|None)
+        Uso interno (también lo usa ats_semantic). Devuelve (texto, uso)
+        donde `uso` es {"key_index", "model", "prompt_tokens",
+        "candidates_tokens", "total_tokens"} o None si la API no lo reportó.
+        Cada llamada exitosa registra el consumo en la tabla `gemini_usage`
+        y lo deja en el log a nivel INFO (solo índice de key, nunca su valor).
+
 Prueba local:
     GEMINI_API_KEY=falsa python3 -c "import brain; print(brain.generate_reply([], 'hola'))"
     # Debe imprimir None y loguear el error, sin traceback.
@@ -41,7 +49,7 @@ log = logging.getLogger("talentum.brain")
 GEMINI_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 )
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-3.6-flash"
 TIMEOUT_SECS = 20
 
 # Pausas del pool de rotación (segundos)
@@ -210,11 +218,92 @@ def _extract_text(response):
     return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
 
-def _call_gemini(contents, system_prompt, temperature=0.7, max_tokens=300):
-    """Llama a generateContent rotando keys. Devuelve texto o None.
+def _extract_usage(response):
+    """Extrae usageMetadata de la respuesta. Dict o None si ausente.
+
+    Nunca lanza: ante cualquier forma inesperada devuelve None.
+    """
+    try:
+        data = response.json()
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    um = data.get("usageMetadata")
+    if not isinstance(um, dict):
+        return None
+
+    def _i(v):
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 0
+        return n if n >= 0 else 0
+
+    return {
+        "prompt_tokens": _i(um.get("promptTokenCount")),
+        "candidates_tokens": _i(um.get("candidatesTokenCount")),
+        "total_tokens": _i(um.get("totalTokenCount")),
+    }
+
+
+# DDL portable de la tabla de consumo (la crea el registrador si no existe;
+# también está en db._ddl() y engine._init_db() para documentación).
+_USAGE_DDL = """
+CREATE TABLE IF NOT EXISTS gemini_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    key_index INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    candidates_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+
+def _record_usage(operation, key_index, model, usage):
+    """Registra el consumo de una llamada: log INFO + tabla gemini_usage.
+
+    Nunca lanza excepciones: un fallo de registro no afecta la respuesta.
+    Solo se registra el índice de la key, nunca su valor.
+    """
+    try:
+        u = usage if isinstance(usage, dict) else {}
+        p = u.get("prompt_tokens", 0)
+        c = u.get("candidates_tokens", 0)
+        t = u.get("total_tokens", 0)
+        log.info(
+            "Gemini uso: op=%s key=#%d model=%s prompt=%d candidatos=%d total=%d",
+            operation, key_index, model, p, c, t,
+        )
+        import db  # importación diferida: brain no depende de db al importarse
+
+        conn = db.connect()
+        try:
+            conn.execute(_USAGE_DDL)
+            conn.execute(
+                "INSERT INTO gemini_usage "
+                "(ts, key_index, model, operation, prompt_tokens, "
+                "candidates_tokens, total_tokens) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (time.time(), key_index, model, operation, p, c, t),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        log.exception("No se pudo registrar el uso de tokens (no afecta la respuesta)")
+
+
+def _call_gemini(contents, system_prompt, temperature=0.7, max_tokens=300,
+                 operation="chat"):
+    """Llama a generateContent rotando keys. Devuelve (texto, uso).
 
     Prueba cada key disponible; ante 429/5xx la pone en pausa y sigue con la
-    siguiente. Si ninguna responde, devuelve None (el motor usa el fallback).
+    siguiente. Si ninguna responde, devuelve (None, None) (el motor usa el
+    fallback). `uso` es None cuando la API no reportó usageMetadata.
     """
     model = _config()
     url = GEMINI_ENDPOINT.format(model=model)
@@ -230,7 +319,7 @@ def _call_gemini(contents, system_prompt, temperature=0.7, max_tokens=300):
         idx, api_key = _POOL.acquire()
         if api_key is None:
             log.error("Sin API keys de Gemini disponibles; se omite la llamada.")
-            return None
+            return None, None
         try:
             r = requests.post(
                 url, params={"key": api_key}, json=body, timeout=TIMEOUT_SECS
@@ -242,10 +331,16 @@ def _call_gemini(contents, system_prompt, temperature=0.7, max_tokens=300):
         if r.status_code == 200:
             _POOL.report(idx, True)
             try:
-                return _extract_text(r)
+                text = _extract_text(r)
             except (KeyError, IndexError, TypeError, ValueError):
                 log.error("Respuesta inesperada de Gemini: %s", r.text[:300])
-                return None
+                return None, None
+            usage = _extract_usage(r)
+            if usage is not None:
+                usage["key_index"] = idx
+                usage["model"] = model
+            _record_usage(operation, idx, model, usage)
+            return text, usage
         # Fallo: se registra, la key entra en pausa y se prueba la siguiente
         log.error("Gemini HTTP %s: %s", r.status_code, r.text[:300])
         _POOL.report(idx, False, status=r.status_code)
@@ -260,7 +355,11 @@ def generate_reply(history, user_message):
     contents = _to_gemini_contents(history, user_message)
     if not contents:
         return None
-    return _call_gemini(contents, SYSTEM_PROMPT, temperature=0.7, max_tokens=300)
+    text, _usage = _call_gemini(
+        contents, SYSTEM_PROMPT, temperature=0.7, max_tokens=300,
+        operation="chat",
+    )
+    return text
 
 
 def _parse_json_object(text):
@@ -287,7 +386,10 @@ def extract_lead(history):
     contents = _to_gemini_contents(history, None)
     if not contents:
         return {}
-    text = _call_gemini(contents, EXTRACTION_PROMPT, temperature=0.0, max_tokens=200)
+    text, _usage = _call_gemini(
+        contents, EXTRACTION_PROMPT, temperature=0.0, max_tokens=200,
+        operation="extract_lead",
+    )
     data = _parse_json_object(text)
     # Normaliza: solo claves conocidas, valores str o None
     out = {}
