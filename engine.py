@@ -585,6 +585,13 @@ def process_message(phone, text):
         owner_reply = _owner_command(text)
         if owner_reply is not None:
             return [owner_reply]
+        # El dueño escribiendo como "cliente" (probando): sin auto-aviso.
+        notify_owner = False
+    else:
+        notify_owner = True
+    # Aviso instantáneo al dueño por cada mensaje de cliente (sin abrir el panel).
+    if notify_owner:
+        _OUTBOX.append((_owner_phone(), f"💬 +{phone}:\n{text[:200]}"))
     conv = get_conversation(phone)
     state, data = conv["state"], conv["data"]
     low = text.lower()
@@ -602,16 +609,11 @@ def process_message(phone, text):
         return [MENU_MSG]
 
     # Ya derivado: el bot queda en silencio para no interrumpir al humano,
-    # pero el mensaje SÍ se guarda en el historial y se avisa al dueño para
-    # que la conversación pueda seguir. Si el "cliente" es el propio dueño
-    # (probando), no se le notifica a sí mismo en el mismo chat.
+    # pero el mensaje SÍ se guarda en el historial (el aviso al dueño ya se
+    # encoló arriba para todos los mensajes).
     if state == ASESOR:
         _push_history(data, "user", text)
         save_conversation(phone, ASESOR, data, 0)
-        if not _is_owner(phone):
-            _OUTBOX.append(
-                (_owner_phone(), f"💬 Cliente +{phone}:\n{text[:200]}")
-            )
         return []
 
     # Derivación explícita a humano (determinista, no depende del LLM)
