@@ -603,13 +603,15 @@ def process_message(phone, text):
 
     # Ya derivado: el bot queda en silencio para no interrumpir al humano,
     # pero el mensaje SÍ se guarda en el historial y se avisa al dueño para
-    # que la conversación pueda seguir.
+    # que la conversación pueda seguir. Si el "cliente" es el propio dueño
+    # (probando), no se le notifica a sí mismo en el mismo chat.
     if state == ASESOR:
         _push_history(data, "user", text)
         save_conversation(phone, ASESOR, data, 0)
-        _OUTBOX.append(
-            (_owner_phone(), f"💬 Cliente +{phone}:\n{text[:200]}")
-        )
+        if not _is_owner(phone):
+            _OUTBOX.append(
+                (_owner_phone(), f"💬 Cliente +{phone}:\n{text[:200]}")
+            )
         return []
 
     # Derivación explícita a humano (determinista, no depende del LLM)
