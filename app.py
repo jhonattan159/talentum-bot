@@ -27,6 +27,31 @@ GRAPH_VERSION = os.environ.get("GRAPH_API_VERSION", "v21.0")
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("talentum")
 
+PRIVACY_HTML = """<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Política de Privacidad — TALENTUM GROUP</title>
+<style>body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;max-width:720px;margin:0 auto;padding:32px 20px;color:#1a1a1a;line-height:1.6}h1{color:#0A1F44}h2{color:#0A1F44;margin-top:28px}.small{color:#666;font-size:14px}</style>
+</head>
+<body>
+<h1>Política de Privacidad — TALENTUM GROUP</h1>
+<p class="small">Última actualización: 10 de octubre de 2026</p>
+<p>TALENTUM GROUP opera un asistente conversacional por WhatsApp que orienta sobre optimización de hojas de vida y servicios de consultoría de talento.</p>
+<h2>Datos que recopilamos</h2>
+<ul><li>Tu número de teléfono de WhatsApp.</li><li>El contenido de los mensajes que nos envías.</li><li>Registros técnicos básicos (fecha y hora) para calidad del servicio.</li></ul>
+<h2>Uso de los datos</h2>
+<p>Solo para responder tus consultas, dar seguimiento a solicitudes y mejorar el asistente. No vendemos ni alquilamos tus datos.</p>
+<h2>Compartición</h2>
+<p>Los mensajes se transmiten vía la plataforma WhatsApp Business de Meta para su entrega; no compartimos datos con terceros salvo obligación legal.</p>
+<h2>Tus derechos</h2>
+<p>Puedes pedir la eliminación de tu historial escribiendo «eliminar mis datos» en el chat o a talentumgroup.ec@gmail.com.</p>
+<h2>Contacto</h2>
+<p>TALENTUM GROUP — Quito, Ecuador<br>talentumgroup.ec@gmail.com</p>
+</body>
+</html>"""
+
 app = FastAPI(title="TALENTUM GROUP — Chatbot WhatsApp")
 
 
@@ -34,6 +59,14 @@ app = FastAPI(title="TALENTUM GROUP — Chatbot WhatsApp")
 def health():
     """Chequeo de vida para Render y monitoreo."""
     return {"status": "ok", "service": "talentum-chatbot"}
+
+
+
+
+@app.get("/privacy")
+def privacy_policy():
+    """Política de privacidad (requerida por Meta para publicar la app)."""
+    return Response(content=PRIVACY_HTML, media_type="text/html")
 
 
 @app.get("/webhook")
