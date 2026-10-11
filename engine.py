@@ -601,8 +601,15 @@ def process_message(phone, text):
         save_conversation(phone, CHAT, data, 0)
         return [MENU_MSG]
 
-    # Ya derivado: el bot queda en silencio para no interrumpir al humano
+    # Ya derivado: el bot queda en silencio para no interrumpir al humano,
+    # pero el mensaje SÍ se guarda en el historial y se avisa al dueño para
+    # que la conversación pueda seguir.
     if state == ASESOR:
+        _push_history(data, "user", text)
+        save_conversation(phone, ASESOR, data, 0)
+        _OUTBOX.append(
+            (_owner_phone(), f"💬 Cliente +{phone}:\n{text[:200]}")
+        )
         return []
 
     # Derivación explícita a humano (determinista, no depende del LLM)
