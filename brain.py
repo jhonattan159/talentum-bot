@@ -2,8 +2,15 @@
 """Cerebro LLM del chatbot de WhatsApp de TALENTUM GROUP.
 
 Usa la API de Google Gemini vía REST directo (módulo `requests`, sin SDK
-pesado). Lee GEMINI_API_KEY y GEMINI_MODEL del entorno en cada llamada
-(para que los tests puedan inyectarlas sin reimportar).
+pesado). Lee las API keys del entorno en cada llamada (para que los tests
+puedan inyectarlas sin reimportar).
+
+Rotación de keys: la variable GEMINI_API_KEYS contiene las claves separadas
+por comas (se acepta también la singular GEMINI_API_KEY como respaldo).
+El pool reparte las llamadas en round-robin y pone en pausa la key que falle:
+  - 429 / 5xx / excepción de red  -> pausa de 60 s (cupo agotado o fallo temporal)
+  - 400 / 401 / 403              -> pausa de 1 h (clave inválida o sin permiso)
+Nunca se registra el valor de las claves, solo su índice.
 
 Contrato:
     generate_reply(history, user_message) -> str | None
@@ -24,6 +31,8 @@ import json
 import logging
 import os
 import re
+import threading
+import time
 
 import requests
 
@@ -34,6 +43,10 @@ GEMINI_ENDPOINT = (
 )
 DEFAULT_MODEL = "gemini-2.0-flash"
 TIMEOUT_SECS = 20
+
+# Pausas del pool de rotación (segundos)
+COOLDOWN_QUOTA = 60      # 429 / 5xx / error de red: cupo agotado o fallo temporal
+COOLDOWN_INVALID = 3600  # 400 / 401 / 403: clave inválida o sin permiso
 
 # ---------------------------------------------------------------------------
 # Prompt del sistema (identidad, tono, tarifario, objetivos)
@@ -93,16 +106,89 @@ Reglas:
 - "service" solo si mencionó un servicio concreto del tarifario."""
 
 # ---------------------------------------------------------------------------
-# Núcleo: llamada a la API
+# Pool de rotación de API keys
 # ---------------------------------------------------------------------------
 
-def _config():
-    """Lee la configuración del entorno en cada llamada (testeable)."""
-    return (
-        os.environ.get("GEMINI_API_KEY", "").strip(),
-        os.environ.get("GEMINI_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL,
-    )
+def _load_keys():
+    """Lee las claves del entorno. Acepta lista (GEMINI_API_KEYS) o singular."""
+    raw = os.environ.get("GEMINI_API_KEYS", "")
+    keys = [k.strip() for k in raw.split(",") if k.strip()]
+    if not keys:
+        single = os.environ.get("GEMINI_API_KEY", "").strip()
+        if single:
+            keys = [single]
+    # Deduplica preservando orden
+    seen, out = set(), []
+    for k in keys:
+        if k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
 
+
+class _KeyPool:
+    """Round-robin de API keys con backoff por fallos. Thread-safe."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._keys = []
+        self._cooldown_until = {}  # idx -> timestamp unix
+        self._pos = 0
+
+    def _refresh(self):
+        keys = _load_keys()
+        with self._lock:
+            if keys != self._keys:
+                self._keys = keys
+                self._cooldown_until = {}
+                self._pos = 0
+
+    def acquire(self):
+        """Devuelve (idx, key) disponible, o (None, None) si no hay."""
+        self._refresh()
+        with self._lock:
+            n = len(self._keys)
+            if n == 0:
+                return None, None
+            now = time.time()
+            for _ in range(n):
+                idx = self._pos % n
+                self._pos += 1
+                if self._cooldown_until.get(idx, 0) <= now:
+                    return idx, self._keys[idx]
+            return None, None
+
+    def report(self, idx, ok, status=None):
+        """Registra el resultado del uso de una key (nunca su valor)."""
+        with self._lock:
+            if ok:
+                self._cooldown_until.pop(idx, None)
+                return
+            now = time.time()
+            if status in (400, 401, 403):
+                self._cooldown_until[idx] = now + COOLDOWN_INVALID
+                log.warning(
+                    "Gemini key #%d rechazada (HTTP %s); en pausa 1h.", idx, status
+                )
+            else:
+                self._cooldown_until[idx] = now + COOLDOWN_QUOTA
+                log.warning(
+                    "Gemini key #%d sin cupo o con fallo (HTTP %s); en pausa 60s.",
+                    idx, status,
+                )
+
+
+_POOL = _KeyPool()
+
+
+def _config():
+    """Lee el modelo del entorno en cada llamada (testeable)."""
+    return os.environ.get("GEMINI_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+
+
+# ---------------------------------------------------------------------------
+# Núcleo: llamada a la API con rotación
+# ---------------------------------------------------------------------------
 
 def _to_gemini_contents(history, user_message):
     """Convierte el historial interno al formato contents de Gemini."""
@@ -118,12 +204,19 @@ def _to_gemini_contents(history, user_message):
     return contents
 
 
+def _extract_text(response):
+    """Extrae el texto de una respuesta 200 de generateContent."""
+    data = response.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+
 def _call_gemini(contents, system_prompt, temperature=0.7, max_tokens=300):
-    """Llama a generateContent. Devuelve el texto o None ante cualquier fallo."""
-    api_key, model = _config()
-    if not api_key:
-        log.warning("GEMINI_API_KEY no configurada; se omite la llamada.")
-        return None
+    """Llama a generateContent rotando keys. Devuelve texto o None.
+
+    Prueba cada key disponible; ante 429/5xx la pone en pausa y sigue con la
+    siguiente. Si ninguna responde, devuelve None (el motor usa el fallback).
+    """
+    model = _config()
     url = GEMINI_ENDPOINT.format(model=model)
     body = {
         "contents": contents,
@@ -133,22 +226,29 @@ def _call_gemini(contents, system_prompt, temperature=0.7, max_tokens=300):
             "maxOutputTokens": max_tokens,
         },
     }
-    try:
-        r = requests.post(
-            url, params={"key": api_key}, json=body, timeout=TIMEOUT_SECS
-        )
-    except Exception:
-        log.exception("Excepción llamando a la API de Gemini")
-        return None
-    if r.status_code != 200:
+    while True:
+        idx, api_key = _POOL.acquire()
+        if api_key is None:
+            log.error("Sin API keys de Gemini disponibles; se omite la llamada.")
+            return None
+        try:
+            r = requests.post(
+                url, params={"key": api_key}, json=body, timeout=TIMEOUT_SECS
+            )
+        except Exception:
+            log.exception("Excepción llamando a la API de Gemini")
+            _POOL.report(idx, False, status="exception")
+            continue
+        if r.status_code == 200:
+            _POOL.report(idx, True)
+            try:
+                return _extract_text(r)
+            except (KeyError, IndexError, TypeError, ValueError):
+                log.error("Respuesta inesperada de Gemini: %s", r.text[:300])
+                return None
+        # Fallo: se registra, la key entra en pausa y se prueba la siguiente
         log.error("Gemini HTTP %s: %s", r.status_code, r.text[:300])
-        return None
-    try:
-        data = r.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except (KeyError, IndexError, TypeError, ValueError):
-        log.error("Respuesta inesperada de Gemini: %s", r.text[:300])
-        return None
+        _POOL.report(idx, False, status=r.status_code)
 
 
 # ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@ import os
 import requests
 from fastapi import FastAPI, Request, Response
 
-from engine import process_message
+from engine import process_message, process_document
 
 # --- Configuración desde variables de entorno (sin secretos en el código) ---
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "")
@@ -27,46 +27,22 @@ GRAPH_VERSION = os.environ.get("GRAPH_API_VERSION", "v21.0")
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("talentum")
 
-PRIVACY_HTML = """<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Política de Privacidad — TALENTUM GROUP</title>
-<style>body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;max-width:720px;margin:0 auto;padding:32px 20px;color:#1a1a1a;line-height:1.6}h1{color:#0A1F44}h2{color:#0A1F44;margin-top:28px}.small{color:#666;font-size:14px}</style>
-</head>
-<body>
-<h1>Política de Privacidad — TALENTUM GROUP</h1>
-<p class="small">Última actualización: 10 de octubre de 2026</p>
-<p>TALENTUM GROUP opera un asistente conversacional por WhatsApp que orienta sobre optimización de hojas de vida y servicios de consultoría de talento.</p>
-<h2>Datos que recopilamos</h2>
-<ul><li>Tu número de teléfono de WhatsApp.</li><li>El contenido de los mensajes que nos envías.</li><li>Registros técnicos básicos (fecha y hora) para calidad del servicio.</li></ul>
-<h2>Uso de los datos</h2>
-<p>Solo para responder tus consultas, dar seguimiento a solicitudes y mejorar el asistente. No vendemos ni alquilamos tus datos.</p>
-<h2>Compartición</h2>
-<p>Los mensajes se transmiten vía la plataforma WhatsApp Business de Meta para su entrega; no compartimos datos con terceros salvo obligación legal.</p>
-<h2>Tus derechos</h2>
-<p>Puedes pedir la eliminación de tu historial escribiendo «eliminar mis datos» en el chat o a talentumgroup.ec@gmail.com.</p>
-<h2>Contacto</h2>
-<p>TALENTUM GROUP — Quito, Ecuador<br>talentumgroup.ec@gmail.com</p>
-</body>
-</html>"""
-
 app = FastAPI(title="TALENTUM GROUP — Chatbot WhatsApp")
+
+
+# --- Panel de administración (supervisión de conversaciones y leads) ---
+try:
+    from admin import router as admin_router
+
+    app.include_router(admin_router)
+except Exception:
+    log.exception("No se pudo montar el panel /admin")
 
 
 @app.get("/health")
 def health():
     """Chequeo de vida para Render y monitoreo."""
     return {"status": "ok", "service": "talentum-chatbot"}
-
-
-
-
-@app.get("/privacy")
-def privacy_policy():
-    """Política de privacidad (requerida por Meta para publicar la app)."""
-    return Response(content=PRIVACY_HTML, media_type="text/html")
 
 
 @app.get("/webhook")
@@ -112,7 +88,76 @@ async def receive_webhook(request: Request):
         for reply in replies:
             send_whatsapp_message(phone, reply)
 
+    for doc in extract_documents(payload):
+        try:
+            if not _is_pdf(doc):
+                replies = [
+                    "Solo puedo analizar archivos PDF. Envíame tu CV en PDF "
+                    "y te hago el diagnóstico ATS gratuito."
+                ]
+            else:
+                pdf_bytes = download_whatsapp_media(doc["media_id"])
+                if pdf_bytes:
+                    replies = process_document(
+                        doc["phone"], pdf_bytes, doc.get("filename") or "cv.pdf"
+                    )
+                else:
+                    replies = [
+                        "No pude descargar el documento. Intenta enviarlo de nuevo."
+                    ]
+        except Exception:
+            log.exception("Error procesando documento de WhatsApp")
+            replies = [
+                "No pude procesar el documento. Intenta de nuevo o escribe ASESOR."
+            ]
+        for reply in replies:
+            send_whatsapp_message(doc["phone"], reply)
+
     return {"status": "ok"}
+
+
+def _is_pdf(doc):
+    """Acepta solo PDFs (por MIME o por extensión del nombre)."""
+    mime = (doc.get("mime_type") or "").lower()
+    name = (doc.get("filename") or "").lower()
+    return mime == "application/pdf" or name.endswith(".pdf")
+
+
+def download_whatsapp_media(media_id):
+    """Descarga un archivo de la Cloud API. Devuelve bytes o None.
+
+    Flujo: GET /{media-id} -> URL temporal -> GET URL con el Bearer token.
+    Nunca lanza excepciones.
+    """
+    if not WHATSAPP_TOKEN or not media_id:
+        log.error("Faltan WHATSAPP_TOKEN o media_id para descargar el archivo.")
+        return None
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    try:
+        meta = requests.get(
+            f"https://graph.facebook.com/{GRAPH_VERSION}/{media_id}",
+            headers=headers,
+            timeout=15,
+        )
+        if meta.status_code != 200:
+            log.error("Error obteniendo URL de media (%s).", meta.status_code)
+            return None
+        url = (meta.json() or {}).get("url")
+        if not url:
+            log.error("La API no devolvió URL para el media %s.", media_id)
+            return None
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code != 200:
+            log.error("Error descargando media (%s).", r.status_code)
+            return None
+        data = r.content or b""
+        if len(data) > 6 * 1024 * 1024:
+            log.warning("Media demasiado pesado (%d bytes); se rechaza.", len(data))
+            return None
+        return data
+    except Exception:
+        log.exception("Excepción descargando media de WhatsApp")
+        return None
 
 
 def extract_messages(payload):
@@ -139,6 +184,38 @@ def extract_messages(payload):
                         out.append((phone, text))
     except Exception:
         log.exception("No se pudo parsear el payload del webhook")
+    return out
+
+
+def extract_documents(payload):
+    """Extrae documentos entrantes del payload de la Cloud API.
+
+    Devuelve lista de dicts: {phone, media_id, mime_type, filename, caption}.
+    Ignora cualquier otro tipo de mensaje.
+    """
+    out = []
+    try:
+        for entry in payload.get("entry", []):
+            for change in entry.get("changes", []):
+                value = change.get("value", {})
+                for msg in value.get("messages", []):
+                    if msg.get("type") != "document":
+                        continue
+                    doc = msg.get("document") or {}
+                    phone = msg.get("from")
+                    media_id = doc.get("id")
+                    if phone and media_id:
+                        out.append(
+                            {
+                                "phone": phone,
+                                "media_id": media_id,
+                                "mime_type": doc.get("mime_type") or "",
+                                "filename": doc.get("filename") or "documento.pdf",
+                                "caption": (doc.get("caption") or "").strip(),
+                            }
+                        )
+    except Exception:
+        log.exception("No se pudo parsear documentos del payload")
     return out
 
 

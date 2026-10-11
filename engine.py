@@ -21,12 +21,15 @@ Prueba local (simulador de consola):
 """
 
 import json
+import logging
 import os
 import re
 import sqlite3
 import time
 
 import brain
+
+log = logging.getLogger("talentum.engine")
 
 # ---------------------------------------------------------------------------
 # Configuración
@@ -248,6 +251,12 @@ def _push_history(data, role, text):
 def handoff(phone, data, motivo="", intent="handoff_asesor"):
     """Deriva a humano: registra el lead y deja al bot en silencio."""
     register_lead(phone, data, intent=intent, note=motivo)
+    try:
+        from alerts import notify_handoff
+
+        notify_handoff(phone, motivo or intent, build_summary(data))
+    except Exception:
+        log.exception("Fallo la alerta de handoff (no afecta al webhook)")
     save_conversation(phone, ASESOR, data, 0)
     msg = (
         "Te derivo con un asesor de TALENTUM GROUP. Te contactará por este mismo "
@@ -266,6 +275,12 @@ def handoff_compra(phone, data):
     register_lead(
         phone, data, intent="intencion_compra", note=f"Servicio: {servicio}"
     )
+    try:
+        from alerts import notify_handoff
+
+        notify_handoff(phone, f"intención de compra ({servicio})", build_summary(data))
+    except Exception:
+        log.exception("Fallo la alerta de handoff (no afecta al webhook)")
     save_conversation(phone, ASESOR, data, 0)
     resumen = build_summary(data)
     msg = (
@@ -381,6 +396,84 @@ def process_message(phone, text):
     _maybe_register_diagnostico(phone, data, extracted)
     save_conversation(phone, CHAT, data, 0)
     return [reply]
+
+
+# ---------------------------------------------------------------------------
+# Diagnóstico ATS (documentos PDF recibidos por WhatsApp)
+# ---------------------------------------------------------------------------
+
+MAX_PDF_BYTES = 5 * 1024 * 1024
+
+
+def _diagnostic_fallback_text(report):
+    """Texto plano del diagnóstico si el formateador semántico no existe."""
+    try:
+        idx = report.get("indice_diagnostico")
+        acciones = (report.get("acciones") or [])[:3]
+        lineas = [
+            "Diagnóstico ATS — TALENTUM GROUP",
+            f"Índice TALENTUM: {idx}/100 "
+            "(rúbrica interna, no es puntaje de ningún ATS).",
+        ]
+        for i, a in enumerate(acciones, 1):
+            lineas.append(f"{i}. {a}")
+        lineas.append("Un asesor puede aplicar esto por ti: responde ASESOR.")
+        return "\n".join(lineas)
+    except Exception:
+        return FALLBACK_MSG
+
+
+def process_document(phone, pdf_bytes, filename="cv.pdf"):
+    """Procesa un PDF entrante: diagnóstico ATS híbrido y respuesta.
+
+    Usa ats_diagnostic.diagnose con la revisión semántica de ats_semantic
+    (si está disponible). Registra el lead del diagnóstico. Nunca lanza
+    excepciones: ante cualquier fallo devuelve un mensaje amable.
+    """
+    if not phone or not pdf_bytes:
+        return []
+    if len(pdf_bytes) > MAX_PDF_BYTES:
+        return ["El archivo supera los 5 MB. Envíalo de nuevo en un PDF más liviano."]
+    try:
+        from ats_diagnostic import diagnose
+    except Exception:
+        return [
+            "No pude analizar el documento en este momento. "
+            "Escribe ASESOR y un asesor te ayuda."
+        ]
+    try:
+        try:
+            from ats_semantic import semantic_review, format_whatsapp
+        except Exception:
+            semantic_review, format_whatsapp = None, None
+        report = diagnose(pdf_bytes, semantic_fn=semantic_review)
+        if format_whatsapp:
+            reply = format_whatsapp(report)
+        else:
+            reply = ""
+        if not reply:
+            reply = _diagnostic_fallback_text(report)
+        # Lead: se registra el diagnóstico con su índice
+        try:
+            conv = get_conversation(phone)
+            data = conv["data"]
+            _push_history(data, "user", f"[documento PDF: {filename}]")
+            _push_history(data, "model", reply)
+            register_lead(
+                phone,
+                data,
+                intent="diagnostico_completado",
+                note=f"Diagnóstico ATS: índice {report.get('indice_diagnostico')}/100",
+            )
+            save_conversation(phone, CHAT, data, 0)
+        except Exception:
+            pass
+        return [reply]
+    except Exception:
+        return [
+            "No pude procesar el PDF. Verifica que sea un PDF válido "
+            "o escribe ASESOR."
+        ]
 
 
 # ---------------------------------------------------------------------------
