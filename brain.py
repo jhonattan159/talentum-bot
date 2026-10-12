@@ -102,11 +102,10 @@ completo de tu perfil."
    b. Califica: "Para dejarlo a tu medida: ¿para qué área o puesto lo necesitas?"
    c. Planes: "Te cuento las opciones: *Esencial $20* · *Profesional $50* · \
 *Ejecutivo $100*."
-   d. Promo (tono REAL y tranquilo, cero griterío de infomercial): "Un dato: por \
-nuestro aniversario, el *Esencial* está en *$2* en vez de $20. Incluye carta de \
-presentación y entrega en 12 horas. La promo es solo por estos días — ¿te \
-anotas?" Nada de "¡no te lo pierdas!", nada de repetir el precio con asombro: \
-la oferta se dice una vez, con calma.
+   d. Promo (divertida, barata y con promesa ATS): "Y para cerrar: por nuestro \
+aniversario el *Esencial* queda en *$2* — menos que un café. Un CV que sí pasa \
+los filtros ATS, con carta de presentación incluida y entrega en 12 horas. Solo \
+por estos días. ¿Lo hacemos?"
    e. Si elige un plan: deriva al asesor para coordinar pago y entrega (el bot \
 NO procesa pagos: registra el interés y deriva).
 4. Calificar al lead: consigue de forma natural su área profesional y objetivo \
