@@ -127,6 +127,66 @@ def send_whatsapp_video(to, video_url, caption=None):
         return False
     return True
 
+
+def upload_whatsapp_media(file_bytes, filename, mime="application/pdf"):
+    """Sube un archivo a WhatsApp y devuelve el media_id (privado, sin URL
+    pública). Devuelve None si falla."""
+    if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
+        log.error("Faltan WHATSAPP_TOKEN o PHONE_NUMBER_ID en el entorno.")
+        return None
+    url = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/media"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    try:
+        r = requests.post(
+            url,
+            headers=headers,
+            files={"file": (filename, bytes(file_bytes), mime)},
+            data={"messaging_product": "whatsapp"},
+            timeout=90,
+        )
+    except Exception:
+        log.exception("Excepción al subir medio a WhatsApp")
+        return None
+    if r.status_code >= 400:
+        log.error("Error al subir medio (%s): %s", r.status_code, r.text[:500])
+        return None
+    try:
+        return r.json().get("id")
+    except Exception:
+        return None
+
+
+def send_whatsapp_document(to, file_bytes, filename, caption=None,
+                           mime="application/pdf"):
+    """Envía un documento PDF por WhatsApp mediante subida directa (privado).
+    Devuelve True si se envió."""
+    media_id = upload_whatsapp_media(file_bytes, filename, mime)
+    if not media_id:
+        return False
+    url = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    document = {"id": media_id, "filename": filename}
+    if caption:
+        document["caption"] = caption[:1024]
+    body = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "document",
+        "document": document,
+    }
+    try:
+        r = requests.post(url, headers=headers, json=body, timeout=30)
+    except Exception:
+        log.exception("Excepción al enviar documento de WhatsApp")
+        return False
+    if r.status_code >= 400:
+        log.error("Error al enviar documento (%s): %s", r.status_code, r.text[:500])
+        return False
+    return True
+
 # ---------------------------------------------------------------------------
 # Catálogo de servicios (fuente única del tarifario)
 # ---------------------------------------------------------------------------
@@ -134,7 +194,7 @@ def send_whatsapp_video(to, video_url, caption=None):
 SERVICES = {
     "esencial": {
         "nombre": "ATS Esencial",
-        "precio": 35,
+        "precio": 20,
         "detalle": (
             "Reestructuración semántica del CV con IA, palabras clave por sector "
             "y formato 100% compatible con ATS. Entrega en 48 horas."
@@ -142,7 +202,7 @@ SERVICES = {
     },
     "profesional": {
         "nombre": "Perfil Profesional",
-        "precio": 75,
+        "precio": 50,
         "detalle": (
             "Todo lo del Esencial + optimización del perfil de LinkedIn + carta "
             "de presentación ejecutiva. Entrega en 72 horas."
@@ -150,7 +210,7 @@ SERVICES = {
     },
     "ejecutivo": {
         "nombre": "Ejecutivo Talentum",
-        "precio": 150,
+        "precio": 100,
         "detalle": (
             "Todo lo del Profesional + auditoría 1:1 con experto (más de 20 años "
             "en selección multinacional) + 2 rondas de revisión + seguimiento de 30 días."
@@ -780,6 +840,45 @@ def process_document(phone, pdf_bytes, filename="cv.pdf"):
             reply = ""
         if not reply:
             reply = _diagnostic_fallback_text(report)
+
+        # Documentos expertos (privados, subida directa a WhatsApp):
+        # 1) el CV del cliente con las marcas del diagnóstico,
+        # 2) el reporte diseñado TALENTUM con colores.
+        try:
+            from cv_annotate import annotate_cv
+            marked = annotate_cv(pdf_bytes, report)
+        except Exception:
+            log.exception("No se pudo anotar el CV")
+            marked = None
+        if marked:
+            send_whatsapp_document(
+                phone, marked, "CV-revisado-TALENTUM.pdf",
+                caption="Tu CV con nuestras marcas: 🔴 crítico · 🟠 a mejorar · "
+                        "🔵 detalle. Toca cada marca para ver qué está mal y "
+                        "cómo arreglarlo.",
+            )
+        try:
+            from report_pdf import build_report_pdf
+            conv_name = ""
+            try:
+                conv_name = str(get_conversation(phone)["data"].get("name") or "")
+            except Exception:
+                pass
+            designed = build_report_pdf(report, client_name=conv_name.strip())
+        except Exception:
+            log.exception("No se pudo generar el reporte diseñado")
+            designed = None
+        if designed:
+            send_whatsapp_document(
+                phone, designed, "Diagnostico-ATS-TALENTUM.pdf",
+                caption="Tu reporte de diagnóstico ATS, con el puntaje y el "
+                        "plan de acción.",
+            )
+
+        # Gancho de cierre: venta suave hacia la elaboración.
+        reply += ("\n\n¿Lo dejamos así o lo reconstruimos para que pase? "
+                  "Por aniversario, la elaboración va en *$2*.")
+
         # Lead: se registra el diagnóstico con su índice
         try:
             conv = get_conversation(phone)

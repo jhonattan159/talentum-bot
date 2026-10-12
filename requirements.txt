@@ -3,4 +3,6 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 requests==2.32.3
 pdfplumber==0.11.10
+pymupdf==1.28.2  # anotación experta del CV (marcas dentro del PDF)
+reportlab==4.2.5  # reporte de diagnóstico diseñado (PDF con marca)
 psycopg2-binary==2.9.10  # PostgreSQL (db.py); si falta, se usa SQLite
