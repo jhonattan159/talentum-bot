@@ -86,6 +86,47 @@ def send_whatsapp_message(to, text):
         return False
     return True
 
+
+# --- Video de bienvenida (primer contacto) ---
+PUBLIC_BASE_URL = os.environ.get(
+    "PUBLIC_BASE_URL", "https://talentum-chatbot.onrender.com"
+).rstrip("/")
+WELCOME_VIDEO_URL = f"{PUBLIC_BASE_URL}/static/bienvenida-talentum.mp4"
+
+
+def send_whatsapp_video(to, video_url, caption=None):
+    """Envía un video vía Graph API usando un link público.
+
+    Requiere MP4 (H.264 + AAC) de menos de 16 MB. Maneja errores sin
+    romper el flujo: registra el fallo y devuelve False.
+    """
+    if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
+        log.error("Faltan WHATSAPP_TOKEN o PHONE_NUMBER_ID en el entorno.")
+        return False
+    url = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    video = {"link": video_url}
+    if caption:
+        video["caption"] = caption[:1024]
+    body = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "video",
+        "video": video,
+    }
+    try:
+        r = requests.post(url, headers=headers, json=body, timeout=30)
+    except Exception:
+        log.exception("Excepción al enviar video de WhatsApp")
+        return False
+    if r.status_code >= 400:
+        log.error("Error al enviar video (%s): %s", r.status_code, r.text[:500])
+        return False
+    return True
+
 # ---------------------------------------------------------------------------
 # Catálogo de servicios (fuente única del tarifario)
 # ---------------------------------------------------------------------------
@@ -627,6 +668,11 @@ def process_message(phone, text):
         _push_history(data, "user", text)
         save_conversation(phone, CHAT, data, 0)
         return handoff(phone, data, motivo="frustración detectada")
+
+    # Primer contacto: video de bienvenida antes del saludo del asistente.
+    # Si el video falla, el saludo de texto igual se envía (no bloquea).
+    if state == INICIO:
+        send_whatsapp_video(phone, WELCOME_VIDEO_URL)
 
     # --- Ruta principal: cerebro LLM ---
     history = _get_history(data)

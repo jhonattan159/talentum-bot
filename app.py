@@ -15,6 +15,7 @@ import os
 
 import requests
 from fastapi import FastAPI, Request, Response
+from fastapi.staticfiles import StaticFiles
 
 from engine import (
     process_message,
@@ -33,6 +34,11 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("talentum")
 
 app = FastAPI(title="TALENTUM GROUP — Chatbot WhatsApp")
+
+# Archivos estáticos públicos (video de bienvenida para WhatsApp, etc.)
+_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+os.makedirs(_STATIC_DIR, exist_ok=True)
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 
 # --- Panel de administración (supervisión de conversaciones y leads) ---
