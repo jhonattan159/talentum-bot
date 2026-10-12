@@ -173,7 +173,7 @@ WELCOME_MSG = (
 MENU_MSG = (
     "Puedo ayudarte con:\n"
     "1. Diagnóstico ATS gratuito\n"
-    "2. Ver servicios (Esencial $35 · Profesional $75 · Ejecutivo $150)\n"
+    "2. Ver servicios (Esencial $20 · Profesional $50 · Ejecutivo $100)\n"
     "3. Hablar con un asesor\n\n"
     "¿Qué necesitas?"
 )
