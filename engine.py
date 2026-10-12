@@ -113,6 +113,26 @@ def diag_busy(phone):
     return True
 
 
+# --- Captura determinística del nombre (tras la bienvenida) ---
+# El LLM a veces pedía el nombre dos veces: el primer mensaje tras el saludo
+# se captura aquí sin depender del modelo.
+_NAME_PREFIX_RE = re.compile(r"^(me llamo|mi nombre es|soy)\s+", re.I)
+_NAME_WORD_RE = re.compile(r"^[A-Za-zÁÉÍÓÚáéíóúÑñÜü']+$")
+
+
+def _looks_like_name(text):
+    """Devuelve el nombre normalizado si el texto parece un nombre, o None."""
+    t = _NAME_PREFIX_RE.sub("", (text or "").strip()).strip()
+    if not t or len(t) > 40 or "?" in t or "http" in t.lower():
+        return None
+    words = t.split()
+    if not 1 <= len(words) <= 3:
+        return None
+    if not all(_NAME_WORD_RE.match(w) for w in words):
+        return None
+    return " ".join(w[:1].upper() + w[1:].lower() for w in words)
+
+
 # --- Video de bienvenida (primer contacto) ---
 PUBLIC_BASE_URL = os.environ.get(
     "PUBLIC_BASE_URL", "https://talentum-chatbot.onrender.com"
@@ -249,11 +269,11 @@ SERVICES = {
 # ---------------------------------------------------------------------------
 
 WELCOME_MSG = (
-    "Hola, bienvenido a TALENTUM GROUP. No solo escribimos CVs: los ingeniamos. "
+    "Hola, bienvenido a *TALENTUM GROUP*. No solo escribimos CVs: los *ingeniamos*. "
     "Analizamos cómo los sistemas ATS leen tu hoja de vida y la reconstruimos "
     "con datos y palabras clave precisas, con el respaldo de años de experiencia "
     "en recursos humanos de multinacionales.\n\n"
-    "Para comenzar, ¿cuál es tu nombre?"
+    "¿Cuál es tu nombre?"
 )
 
 MENU_MSG = (
@@ -763,6 +783,23 @@ def process_message(phone, text):
         save_conversation(phone, CHAT, data, 0)
         return handoff(phone, data, motivo="frustración detectada")
 
+    # Nombre tras la bienvenida: captura determinística (el LLM a veces lo
+    # pedía dos veces). Si no parece un nombre, sigue el flujo normal.
+    if data.pop("_esperando_nombre", False):
+        name = _looks_like_name(text)
+        if name:
+            data["name"] = name
+            reply = (
+                f"Gusto en saludarte, {name}.\n\n"
+                "¿Te gustaría recibir un *diagnóstico gratuito* de tu CV para "
+                "ver cómo está frente a los filtros ATS? ¿O prefieres que "
+                "*elaboremos tu CV* directamente?"
+            )
+            _push_history(data, "user", text)
+            _push_history(data, "model", reply)
+            save_conversation(phone, CHAT, data, 0)
+            return [reply]
+
     # Primer contacto: el video de bienvenida se envía ANTES del saludo.
     # WhatsApp tarda varios segundos en procesar el archivo (10 MB): sin una
     # pausa, el texto —que sale al instante— le ganaría y llegaría primero.
@@ -770,6 +807,7 @@ def process_message(phone, text):
     if state == INICIO:
         if send_whatsapp_video(phone, WELCOME_VIDEO_URL):
             time.sleep(7)
+        data["_esperando_nombre"] = True
 
     # --- Ruta principal: cerebro LLM ---
     history = _get_history(data)

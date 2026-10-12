@@ -12,9 +12,10 @@ hardcodeadas en el código.
 
 import logging
 import os
+import time
 
 import requests
-from fastapi import FastAPI, Request, Response
+from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
 
 from engine import (
@@ -93,18 +94,48 @@ def verify_webhook(request: Request):
 
 
 @app.post("/webhook")
-async def receive_webhook(request: Request):
-    """Recibe eventos de la Cloud API: los pasa por el motor y responde.
+async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
+    """Recibe eventos de la Cloud API.
 
-    Siempre responde 200 para que Meta no reintente el envío.
+    Devuelve 200 de inmediato y procesa en segundo plano: el análisis de un
+    PDF tarda minutos y bloquearía el health check de Render (lo declara
+    muerto y lo reinicia a mitad del trabajo).
     """
     try:
         payload = await request.json()
     except Exception:
         log.warning("Payload no JSON; se ignora.")
         return {"status": "ignored"}
+    background_tasks.add_task(_handle_payload, payload)
+    return {"status": "ok"}
 
-    for phone, text in extract_messages(payload):
+
+# Antiduplicados: Meta reintenta el webhook si no devolvemos 200 rápido.
+# Sin esto, un mismo PDF/mensaje se procesa dos veces.
+_SEEN_MSG_IDS = {}
+_SEEN_TTL_S = 3600
+
+
+def _seen(msg_id):
+    """True si el id ya se procesó (reintento de Meta): se ignora."""
+    if not msg_id:
+        return False
+    now = time.time()
+    for k, ts in list(_SEEN_MSG_IDS.items()):
+        if now - ts > _SEEN_TTL_S:
+            del _SEEN_MSG_IDS[k]
+    if msg_id in _SEEN_MSG_IDS:
+        return True
+    _SEEN_MSG_IDS[msg_id] = now
+    return False
+
+
+def _handle_payload(payload):
+    """Procesa el payload en segundo plano (hilo del pool de Starlette)."""
+    for phone, text, msg_id in extract_messages(payload):
+        if _seen(msg_id):
+            log.info("Mensaje duplicado %s ignorado", msg_id)
+            continue
         try:
             replies = process_message(phone, text)
         except Exception:
@@ -130,6 +161,9 @@ async def receive_webhook(request: Request):
                 )
 
     for doc in extract_documents(payload):
+        if _seen(doc.get("msg_id")):
+            log.info("Documento duplicado %s ignorado", doc.get("msg_id"))
+            continue
         try:
             if not _is_pdf(doc):
                 replies = [
@@ -161,8 +195,6 @@ async def receive_webhook(request: Request):
             ]
         for reply in replies:
             send_whatsapp_message(doc["phone"], reply)
-
-    return {"status": "ok"}
 
 
 def _is_pdf(doc):
@@ -210,7 +242,7 @@ def download_whatsapp_media(media_id):
 
 
 def extract_messages(payload):
-    """Extrae pares (teléfono, texto) de los mensajes entrantes.
+    """Extrae tuplas (teléfono, texto, id_mensaje) de los mensajes entrantes.
 
     Acepta mensajes de texto y respuestas de botones interactivos.
     Ignora estados de entrega/lectura y cualquier otro evento.
@@ -222,6 +254,7 @@ def extract_messages(payload):
                 value = change.get("value", {})
                 for msg in value.get("messages", []):
                     phone = msg.get("from")
+                    msg_id = msg.get("id")
                     text = ""
                     if msg.get("type") == "text":
                         text = (msg.get("text") or {}).get("body", "")
@@ -230,7 +263,7 @@ def extract_messages(payload):
                         br = inter.get("button_reply") or inter.get("list_reply") or {}
                         text = br.get("title") or br.get("id") or ""
                     if phone and text:
-                        out.append((phone, text))
+                        out.append((phone, text, msg_id))
     except Exception:
         log.exception("No se pudo parsear el payload del webhook")
     return out
@@ -239,8 +272,8 @@ def extract_messages(payload):
 def extract_documents(payload):
     """Extrae documentos entrantes del payload de la Cloud API.
 
-    Devuelve lista de dicts: {phone, media_id, mime_type, filename, caption}.
-    Ignora cualquier otro tipo de mensaje.
+    Devuelve lista de dicts: {phone, media_id, mime_type, filename, caption,
+    msg_id}. Ignora cualquier otro tipo de mensaje.
     """
     out = []
     try:
@@ -257,6 +290,7 @@ def extract_documents(payload):
                         out.append(
                             {
                                 "phone": phone,
+                                "msg_id": msg.get("id"),
                                 "media_id": media_id,
                                 "mime_type": doc.get("mime_type") or "",
                                 "filename": doc.get("filename") or "documento.pdf",
