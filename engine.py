@@ -164,11 +164,10 @@ SERVICES = {
 
 WELCOME_MSG = (
     "Hola, bienvenido a TALENTUM GROUP. No solo escribimos CVs: los ingeniamos. "
-    "Aplicamos ingeniería de perfiles — analizamos cómo los sistemas ATS leen "
-    "tu hoja de vida y la reconstruimos con datos y palabras clave precisas — "
-    "con el respaldo de años de experiencia en recursos humanos "
-    "de multinacionales.\n\n"
-    "¿Cuál es tu nombre?"
+    "Analizamos cómo los sistemas ATS leen tu hoja de vida y la reconstruimos "
+    "con datos y palabras clave precisas, con el respaldo de años de experiencia "
+    "en recursos humanos de multinacionales.\n\n"
+    "Para comenzar, ¿cuál es tu nombre?"
 )
 
 MENU_MSG = (
@@ -670,10 +669,13 @@ def process_message(phone, text):
         save_conversation(phone, CHAT, data, 0)
         return handoff(phone, data, motivo="frustración detectada")
 
-    # Primer contacto: video de bienvenida antes del saludo del asistente.
+    # Primer contacto: el video de bienvenida se envía ANTES del saludo.
+    # WhatsApp tarda varios segundos en procesar el archivo (10 MB): sin una
+    # pausa, el texto —que sale al instante— le ganaría y llegaría primero.
     # Si el video falla, el saludo de texto igual se envía (no bloquea).
     if state == INICIO:
-        send_whatsapp_video(phone, WELCOME_VIDEO_URL)
+        if send_whatsapp_video(phone, WELCOME_VIDEO_URL):
+            time.sleep(7)
 
     # --- Ruta principal: cerebro LLM ---
     history = _get_history(data)
