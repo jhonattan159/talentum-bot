@@ -378,10 +378,13 @@ def _verdict(indice):
     if indice is None:
         return "Diagnóstico listo."
     if indice >= 75:
-        return "Tu CV está en forma: pequeños ajustes lo dejan listo."
+        return ("Tu CV está en forma: *{}/100*. Pasa los filtros, pero estos "
+                "ajustes lo ponen a competir de verdad.".format(indice))
     if indice >= 50:
-        return "Tu CV tiene base sólida y brechas claras que corregir."
-    return "Tu CV necesita una reestructuración a fondo para pasar filtros ATS."
+        return ("*{}/100* — tu CV se lee, pero tiene frenos que te están "
+                "costando entrevistas. La buena noticia: son corregibles.".format(indice))
+    return ("*{}/100* — hoy tu CV muere en el filtro antes de que un humano "
+            "lo vea. Necesita reconstrucción, no retoques.".format(indice))
 
 
 def _short(text, max_words=10):
@@ -414,10 +417,10 @@ def _accion_item(a):
 
 
 def format_whatsapp(report):
-    """Formatea el reporte final como mensaje de WhatsApp (1200-2000 chars).
+    """Reporte con labia de experto (1200-2000 chars).
 
-    Incluye bloque por sección, top 3 fortalezas y acciones priorizadas
-    con su porqué. Tono ejecutivo, sin clichés.
+    Puntaje con stakes, frenos priorizados con su arreglo, fortalezas y plan
+    de acción. Sin clichés de IA, sin inventar hallazgos.
     """
     try:
         if not isinstance(report, dict):
@@ -429,31 +432,44 @@ def format_whatsapp(report):
         except (TypeError, ValueError):
             indice = None
 
-        secciones = [s for s in (report.get("secciones") or [])
-                     if isinstance(s, dict)][:MAX_SECCIONES]
+        findings = [f for f in (report.get("criterios") or [])
+                    if isinstance(f, dict)]
+        _sev_order = {"critico": 0, "medio": 1, "leve": 2}
+        findings.sort(key=lambda f: _sev_order.get(
+            str(f.get("severidad")).lower(), 9))
+        frenos = [f for f in findings
+                  if str(f.get("severidad")).lower() in ("critico", "medio")][:4]
+        if not frenos:
+            frenos = findings[:2]
+
         fortalezas = [f for f in (report.get("fortalezas") or [])
                       if isinstance(f, str) and f.strip()][:3]
-        acciones = [a for a in (report.get("acciones") or [])][:5]
+        acciones = [a for a in (report.get("acciones") or [])][:4]
 
         lines = []
-        lines.append("📋 *Diagnóstico ATS — TALENTUM GROUP*")
+        lines.append("*Diagnóstico ATS — TALENTUM GROUP*")
         lines.append(_verdict(indice))
-        if indice is not None:
-            lines.append(
-                "Índice TALENTUM: *{}/100* ({}).".format(indice, METHODOLOGY_SHORT)
-            )
-        else:
-            lines.append("Índice no disponible en esta revisión.")
+        lines.append("Índice TALENTUM: *{}/100* ({}).".format(
+            indice if indice is not None else "—", METHODOLOGY_SHORT))
 
-        if secciones:
+        if frenos:
             lines.append("")
-            lines.append("*Por sección:*")
-            for sec in secciones:
-                lines.append(_section_line(sec))
+            lines.append("*Lo que más te frena:*")
+            for i, f in enumerate(frenos, 1):
+                criterio = str(f.get("criterio") or "").strip()
+                hallazgo = str(f.get("hallazgo") or "").strip()
+                fix = str(f.get("como_arreglarlo") or "").strip()
+                if len(hallazgo) > 170:
+                    hallazgo = hallazgo[:167].rstrip() + "…"
+                if len(fix) > 150:
+                    fix = fix[:147].rstrip() + "…"
+                lines.append("{}. *{}* — {}".format(i, criterio, hallazgo))
+                if fix:
+                    lines.append("   ↳ *Arreglo:* " + fix)
 
         if fortalezas:
             lines.append("")
-            lines.append("*Fortalezas:*")
+            lines.append("*Tus fortalezas:*")
             for f in fortalezas:
                 f = f.strip()
                 if len(f) > 160:
@@ -462,22 +478,20 @@ def format_whatsapp(report):
 
         if acciones:
             lines.append("")
-            lines.append("*Acciones priorizadas:*")
+            lines.append("*Tu plan de acción:*")
             for i, a in enumerate(acciones, 1):
                 accion, porque = _accion_item(a)
                 if not accion:
                     continue
-                if len(accion) > 220:
-                    accion = accion[:217].rstrip() + "…"
+                if len(accion) > 200:
+                    accion = accion[:197].rstrip() + "…"
                 lines.append("{}. {}".format(i, accion))
                 if porque:
-                    if len(porque) > 140:
-                        porque = porque[:137].rstrip() + "…"
+                    if len(porque) > 130:
+                        porque = porque[:127].rstrip() + "…"
                     lines.append("   ↳ *Por qué:* " + porque)
 
         lines.append("")
-        lines.append("Un asesor puede aplicar esto por ti: responde *ASESOR*.")
-
         msg = "\n".join(lines)
         for cliche in BANNED_CLICHES:
             if cliche.lower() in msg.lower():

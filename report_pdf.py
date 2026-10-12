@@ -58,10 +58,10 @@ def _verdict(score):
     except (TypeError, ValueError):
         return "Puntaje no disponible en esta revisión."
     if s >= 75:
-        return "Tu CV está bien encaminado: con ajustes puntuales puede competir."
+        return "Tu CV está en forma: pasa los filtros, pero estos ajustes lo ponen a competir de verdad."
     if s >= 50:
-        return "Tu CV necesita trabajo: hay frenos reales que corregir."
-    return "Tu CV hoy no pasa los filtros ATS: requiere reconstrucción."
+        return "Tu CV se lee, pero tiene frenos que te están costando entrevistas. La buena noticia: son corregibles."
+    return "Hoy tu CV muere en el filtro antes de que un humano lo vea. Necesita reconstrucción, no retoques."
 
 
 def build_report_pdf(report, client_name=""):
@@ -153,7 +153,7 @@ def build_report_pdf(report, client_name=""):
         # ---- Hallazgos por severidad ----
         findings = [f for f in (report.get("criterios") or []) if isinstance(f, dict)]
         if findings:
-            story.append(Paragraph("Hallazgos del análisis", s_h2))
+            story.append(Paragraph("Lo que más te frena", s_h2))
             order = {"critico": 0, "medio": 1, "leve": 2}
             findings.sort(key=lambda f: order.get(str(f.get("severidad")).lower(), 9))
             for f in findings:
@@ -187,7 +187,7 @@ def build_report_pdf(report, client_name=""):
         forts = [x for x in (report.get("fortalezas") or [])
                  if isinstance(x, str) and x.strip()][:5]
         if forts:
-            story.append(Paragraph("Fortalezas detectadas", s_h2))
+            story.append(Paragraph("Tus fortalezas", s_h2))
             for x in forts:
                 story.append(Paragraph(
                     f"<font color=\"#2BA84A\">●</font> &nbsp;{x.strip()}", s_body))
@@ -196,7 +196,7 @@ def build_report_pdf(report, client_name=""):
         # ---- Acciones priorizadas ----
         accs = [a for a in (report.get("acciones") or [])][:5]
         if accs:
-            story.append(Paragraph("Acciones priorizadas", s_h2))
+            story.append(Paragraph("Tu plan de acción", s_h2))
             for i, a in enumerate(accs, 1):
                 txt = a if isinstance(a, str) else str(a)
                 story.append(Paragraph(f"<b>{i}.</b> &nbsp;{txt.strip()}", s_body))

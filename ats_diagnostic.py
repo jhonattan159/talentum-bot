@@ -592,10 +592,17 @@ def deterministic_checks(parsed, job_posting_text=None):
 # ---------------------------------------------------------------------------
 
 def _score_findings(findings):
-    """100 - 15 por crítico, -7 por medio, -3 por leve. Mínimo 0."""
+    """100 - 15 por crítico, -7 por medio, -3 por leve. Mínimo 0.
+
+    Caso especial: si el PDF no tiene texto extraíble, el ATS no puede leer
+    nada — el puntaje se topa en 30 aunque haya un solo hallazgo.
+    """
     score = 100
     for f in findings:
         score -= _PENALIZACION.get(f.get("severidad"), 0)
+    if any(str(f.get("criterio")) == "Texto extraíble"
+           and str(f.get("severidad")) == "critico" for f in findings):
+        score = min(score, 30)
     return max(0, score)
 
 
