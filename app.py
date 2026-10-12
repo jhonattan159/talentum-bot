@@ -139,6 +139,14 @@ async def receive_webhook(request: Request):
             else:
                 pdf_bytes = download_whatsapp_media(doc["media_id"])
                 if pdf_bytes:
+                    # Acuse inmediato: el análisis tarda (PDF de varias páginas),
+                    # el cliente no se queda en visto.
+                    send_whatsapp_message(
+                        doc["phone"],
+                        "¡Recibido! Ya estoy analizando tu CV — en unos minutos "
+                        "te mando el diagnóstico completo, con las marcas en tu "
+                        "documento y el reporte.",
+                    )
                     replies = process_document(
                         doc["phone"], pdf_bytes, doc.get("filename") or "cv.pdf"
                     )

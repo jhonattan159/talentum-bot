@@ -87,6 +87,32 @@ def send_whatsapp_message(to, text):
     return True
 
 
+# --- Diagnóstico en curso (acuse + mensajes de espera) ---
+# Mientras se analiza un PDF, los mensajes que lleguen del mismo número
+# reciben un mensaje de espera en vez del flujo normal (TTL 10 min).
+_DIAG_IN_PROGRESS = {}
+_DIAG_TTL_S = 10 * 60
+HOLD_MSG = "Ya mismo te mando tu diagnóstico, dame un minutito más."
+
+
+def diag_start(phone):
+    _DIAG_IN_PROGRESS[phone] = time.time()
+
+
+def diag_end(phone):
+    _DIAG_IN_PROGRESS.pop(phone, None)
+
+
+def diag_busy(phone):
+    ts = _DIAG_IN_PROGRESS.get(phone)
+    if ts is None:
+        return False
+    if time.time() - ts > _DIAG_TTL_S:
+        _DIAG_IN_PROGRESS.pop(phone, None)
+        return False
+    return True
+
+
 # --- Video de bienvenida (primer contacto) ---
 PUBLIC_BASE_URL = os.environ.get(
     "PUBLIC_BASE_URL", "https://talentum-chatbot.onrender.com"
@@ -697,6 +723,14 @@ def process_message(phone, text):
     state, data = conv["state"], conv["data"]
     low = text.lower()
 
+    # Diagnóstico en curso: mensaje de espera (no se pierde el mensaje,
+    # no se interrumpe el análisis).
+    if diag_busy(phone):
+        _push_history(data, "user", text)
+        _push_history(data, "model", HOLD_MSG)
+        save_conversation(phone, state, data, 0)
+        return [HOLD_MSG]
+
     # Comando global: reiniciar la conversación
     if re.search(r"\breiniciar\b", low):
         save_conversation(phone, CHAT, {}, 0)
@@ -811,16 +845,21 @@ def _diagnostic_fallback_text(report):
 
 
 def process_document(phone, pdf_bytes, filename="cv.pdf"):
-    """Procesa un PDF entrante: diagnóstico ATS híbrido y respuesta.
-
-    Usa ats_diagnostic.diagnose con la revisión semántica de ats_semantic
-    (si está disponible). Registra el lead del diagnóstico. Nunca lanza
-    excepciones: ante cualquier fallo devuelve un mensaje amable.
-    """
+    """Punto de entrada: marca el diagnóstico en curso (mensajes de espera)
+    y delega el trabajo pesado. Nunca deja la marca colgada."""
     if not phone or not pdf_bytes:
         return []
     if len(pdf_bytes) > MAX_PDF_BYTES:
         return ["El archivo supera los 5 MB. Envíalo de nuevo en un PDF más liviano."]
+    diag_start(phone)
+    try:
+        return _process_document_inner(phone, pdf_bytes, filename)
+    finally:
+        diag_end(phone)
+
+
+def _process_document_inner(phone, pdf_bytes, filename="cv.pdf"):
+    """Trabajo pesado del diagnóstico (llamado con la marca de en-curso activa)."""
     try:
         from ats_diagnostic import diagnose
     except Exception:
