@@ -163,8 +163,10 @@ SERVICES = {
 # ---------------------------------------------------------------------------
 
 WELCOME_MSG = (
-    "Hola, bienvenido a TALENTUM GROUP. Somos una empresa construida con "
-    "ingeniería en perfiles, con años de experiencia en recursos humanos "
+    "Hola, bienvenido a TALENTUM GROUP. No solo escribimos CVs: los ingeniamos. "
+    "Aplicamos ingeniería de perfiles — analizamos cómo los sistemas ATS leen "
+    "tu hoja de vida y la reconstruimos con datos y palabras clave precisas — "
+    "con el respaldo de años de experiencia en recursos humanos "
     "de multinacionales.\n\n"
     "¿Cuál es tu nombre?"
 )
