@@ -38,6 +38,24 @@ app = FastAPI(title="TALENTUM GROUP — Chatbot WhatsApp")
 # Archivos estáticos públicos (video de bienvenida para WhatsApp, etc.)
 _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 os.makedirs(_STATIC_DIR, exist_ok=True)
+
+# El MP4 no puede subirse por la API de GitHub (solo texto); si falta en el
+# repo, se recupera del blob que quedó en el historial (commit de subida).
+_WELCOME_VIDEO = os.path.join(_STATIC_DIR, "bienvenida-talentum.mp4")
+_WELCOME_VIDEO_FALLBACK_URL = (
+    "https://raw.githubusercontent.com/jhonattan159/talentum-bot/"
+    "fb0c0fd9c1a8970756b37faa11fff6274c30e50d/"
+    "Video%20de%20bienvenida%20TALENTUM%20v2.mp4"
+)
+if not os.path.exists(_WELCOME_VIDEO):
+    try:
+        import urllib.request
+        log.info("Descargando video de bienvenida (fallback del historial)...")
+        urllib.request.urlretrieve(_WELCOME_VIDEO_FALLBACK_URL, _WELCOME_VIDEO)
+        log.info("Video de bienvenida recuperado: %d bytes", os.path.getsize(_WELCOME_VIDEO))
+    except Exception:
+        log.exception("No se pudo recuperar el video de bienvenida (se envía solo texto)")
+
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 
